@@ -73,6 +73,80 @@ impl Console {
             | (scale(b, self.blue_size) << self.blue_shift)
     }
 
+    pub fn width(&self) -> usize {
+        self.width
+    }
+
+    pub fn height(&self) -> usize {
+        self.height
+    }
+
+    /// Pixel-precise rectangle fill, for GUI use (unlike the character-grid
+    /// text console, which only ever addresses whole 8x8 cells).
+    pub fn fill_rect(&mut self, x: i32, y: i32, w: u32, h: u32, color: (u8, u8, u8)) {
+        let packed = self.pack(color.0, color.1, color.2);
+        let x0 = x.max(0) as usize;
+        let y0 = y.max(0) as usize;
+        let x1 = ((x as i64 + w as i64).max(0) as usize).min(self.width);
+        let y1 = ((y as i64 + h as i64).max(0) as usize).min(self.height);
+        for py in y0..y1 {
+            for px in x0..x1 {
+                self.put_pixel(px, py, packed);
+            }
+        }
+    }
+
+    /// Pixel-precise single-glyph draw. `bg` of `None` leaves background
+    /// pixels untouched (useful for overlaying text on something already
+    /// drawn, e.g. a title bar).
+    pub fn draw_char_at(
+        &mut self,
+        x: i32,
+        y: i32,
+        ch: u8,
+        fg: (u8, u8, u8),
+        bg: Option<(u8, u8, u8)>,
+    ) {
+        let glyph = if (ch as usize) < FONT8X8.len() {
+            &FONT8X8[ch as usize]
+        } else {
+            &FONT8X8[b'?' as usize]
+        };
+        let fg_color = self.pack(fg.0, fg.1, fg.2);
+        let bg_color = bg.map(|c| self.pack(c.0, c.1, c.2));
+        for (dy, bits) in glyph.iter().enumerate() {
+            let py = y + dy as i32;
+            if py < 0 || py as usize >= self.height {
+                continue;
+            }
+            for dx in 0..GLYPH_W {
+                let px = x + dx as i32;
+                if px < 0 || px as usize >= self.width {
+                    continue;
+                }
+                if (bits >> dx) & 1 != 0 {
+                    self.put_pixel(px as usize, py as usize, fg_color);
+                } else if let Some(bg_color) = bg_color {
+                    self.put_pixel(px as usize, py as usize, bg_color);
+                }
+            }
+        }
+    }
+
+    /// Pixel-precise string draw, left-to-right, 8px advance per character.
+    pub fn draw_str_at(
+        &mut self,
+        x: i32,
+        y: i32,
+        s: &str,
+        fg: (u8, u8, u8),
+        bg: Option<(u8, u8, u8)>,
+    ) {
+        for (i, byte) in s.bytes().enumerate() {
+            self.draw_char_at(x + (i * GLYPH_W) as i32, y, byte, fg, bg);
+        }
+    }
+
     fn put_pixel(&mut self, x: usize, y: usize, color: u32) {
         if x >= self.width || y >= self.height {
             return;
@@ -177,6 +251,13 @@ pub unsafe fn init(fb: &Framebuffer) {
         console.clear_row(row);
     }
     *CONSOLE.lock() = Some(console);
+}
+
+/// Runs `f` with exclusive access to the console/framebuffer, if one was
+/// initialized. Used by the GUI compositor to batch a whole redraw under a
+/// single lock acquisition.
+pub fn with<R>(f: impl FnOnce(&mut Console) -> R) -> Option<R> {
+    CONSOLE.lock().as_mut().map(f)
 }
 
 #[doc(hidden)]

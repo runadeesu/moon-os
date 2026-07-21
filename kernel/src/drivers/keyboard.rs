@@ -77,6 +77,6 @@ pub fn handle_irq() {
     let ascii = SCANCODE_ASCII.get(scancode as usize).copied().unwrap_or(0);
     if ascii != 0 {
         crate::serial_print!("{}", ascii as char);
-        crate::fb_print!("{}", ascii as char);
+        crate::gui::on_key(ascii);
     }
 }

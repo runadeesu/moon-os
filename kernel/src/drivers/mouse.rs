@@ -75,13 +75,6 @@ fn process_packet() {
     let middle = flags & 0x04 != 0;
 
     if dx != 0 || dy != 0 || left || right || middle {
-        crate::serial_println!(
-            "[mouse] dx={} dy={} left={} right={} middle={}",
-            dx,
-            dy,
-            left,
-            right,
-            middle
-        );
+        crate::gui::on_mouse(dx, dy, left, right, middle);
     }
 }

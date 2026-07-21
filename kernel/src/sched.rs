@@ -15,9 +15,17 @@ use crate::arch::x86_64::idt::TrapFrame;
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use core::mem::size_of;
+use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
 
 const STACK_SIZE: usize = 32 * 1024;
+
+static TICKS: AtomicU64 = AtomicU64::new(0);
+
+/// Number of timer ticks (currently 100/sec) since the scheduler started.
+pub fn ticks() -> u64 {
+    TICKS.load(Ordering::Relaxed)
+}
 
 struct Task {
     id: u64,
@@ -85,6 +93,7 @@ pub fn task_count() -> usize {
 /// into: either the same one that was interrupted (nothing to switch to
 /// yet), or the next task's in round-robin order.
 pub fn on_timer_tick(current_frame: *mut TrapFrame) -> *mut TrapFrame {
+    TICKS.fetch_add(1, Ordering::Relaxed);
     let mut sched = SCHED.lock();
 
     if sched.tasks.is_empty() {

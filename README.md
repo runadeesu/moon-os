@@ -5,7 +5,7 @@ Windows・macOS・Linux・Android のいいところを参考にした、完全�
 
 現在のマイルストーンや今後の計画は [ROADMAP.md](ROADMAP.md) を参照してください。
 
-## 現状 (M0/M1/M2/M3/M4 完了)
+## 現状 (M0〜M5 基本部分 完了)
 
 - 独自64bitカーネル (Rust, `no_std` / stable toolchain, ナイトリー不要)
 - ブートローダーは [Limine](https://github.com/limine-bootloader/limine) を採用
@@ -25,8 +25,13 @@ Windows・macOS・Linux・Android のいいところを参考にした、完全�
 - PCIバス列挙 + AHCI (SATA) ドライバ — HBA/ポート初期化、ATA IDENTIFY、ATAPI PACKET経由の
   セクタ読み込みに対応。起動用ISOイメージから実際にセクタを読み、ISO9660の"CD001"署名を確認済み
 - 簡易VFS + RAMFS (`kernel/src/fs/`) — ファイルの書き込み/読み込み/一覧を実装
+- ウィンドウシステム (`kernel/src/gui/`) — コンポジタ/ウィンドウマネージャー、タスクバー、
+  クリックでのフォーカス切り替え、タイトルバードラッグでのウィンドウ移動に対応。
+  ターミナル(help/clear/uptime/mem/echoコマンド)と設定(ライブシステム情報)の
+  組み込みウィジェットを搭載 — まだユーザーモードが無いため「アプリ」はカーネル内蔵
 - QEMU (BIOS/UEFI 両方) での起動・ヒープ動作・マルチタスク・キーボード/マウス入力・
-  ディスクI/Oを実機確認済み
+  ディスクI/O・ウィンドウのドラッグ操作/フォーカス切り替え/ターミナル操作を
+  スクリーンショット付きで実機確認済み
 
 ## リポジトリ構成
 
@@ -70,6 +75,13 @@ moon-os/
 │       ├── fs/
 │       │   ├── mod.rs             # VFS (現状はRAMFS一枚のマウント)
 │       │   └── ramfs.rs            # インメモリファイルシステム
+│       ├── gui/
+│       │   ├── mod.rs             # コンポジタ本体・入力イベント処理
+│       │   ├── window.rs           # Window構造体 (位置/サイズ/タイトル/内容)
+│       │   ├── taskbar.rs          # タスクバー描画
+│       │   └── widgets/
+│       │       ├── terminal.rs      # ターミナルウィジェット (組み込みコマンド)
+│       │       └── settings.rs      # 設定ウィジェット (ライブシステム情報)
 │       └── sched.rs               # プリエンプティブ・ラウンドロビンスケジューラ
 └── tools/
     ├── build.sh              # カーネルビルド + ISO作成 (Limineは初回実行時に自動取得)
@@ -124,6 +136,7 @@ pmm: 255 MiB total, 254 MiB free (65382 4K frames)
 heap: mapped and handed to the global allocator
 heap self-test: Vec<u32> of 16 squares, sum=1240
 framebuffer: 1280x800 @ 32 bpp
+gui: initialized, 1280x800
 ramfs: /hello.txt = "Hello from moon OS RAMFS!\n"
 ramfs: files = ["/hello.txt"]
 ahci: found controller 8086:2922 at 00:1f.2 (ABAR=0xfebd5000)
@@ -146,10 +159,10 @@ interrupts enabled, 100 Hz timer running, entering idle loop
 qemu-system-x86_64 -M q35 -m 256M -cdrom build/moon-os.iso -serial stdio -display none -no-reboot -no-shutdown
 ```
 
-## 次の開発ステップ (M5: GUI / ウィンドウシステム)
+## 次の開発ステップ (M6: ネットワーク)
 
-- コンポジタ / ウィンドウマネージャー
-- 描画プリミティブ (矩形、フォント、画像)
-- イベントループ (マウス/キーボード入力の配送)
+- NIC ドライバ (virtio-net → 実 NIC)
+- TCP/IP スタック
+- DHCP / DNS
 
 詳細は [ROADMAP.md](ROADMAP.md) を参照してください。

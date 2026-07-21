@@ -12,6 +12,7 @@ mod drivers;
 mod font;
 mod framebuffer;
 mod fs;
+mod gui;
 mod limine;
 mod memory;
 mod sched;
@@ -108,9 +109,7 @@ extern "C" fn kmain() -> ! {
             let fb = unsafe { &*fb_ptr };
             crate::serial_println!("framebuffer: {}x{} @ {} bpp", fb.width, fb.height, fb.bpp);
             unsafe { framebuffer::init(fb) };
-            crate::fb_println!("moon OS");
-            crate::fb_println!("kernel M2 milestone: preemptive round-robin scheduler is alive");
-            crate::fb_println!("heap self-test: Vec<u32> of {} squares, sum={}", 16, sum);
+            gui::init();
         }
         None => crate::serial_println!("no framebuffer available"),
     }
