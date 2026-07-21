@@ -188,6 +188,13 @@ pub fn _print(args: core::fmt::Arguments) {
 }
 
 #[macro_export]
+macro_rules! fb_print {
+    ($($arg:tt)*) => {
+        $crate::framebuffer::_print(format_args!($($arg)*))
+    };
+}
+
+#[macro_export]
 macro_rules! fb_println {
     () => { $crate::framebuffer::_print(format_args!("\n")) };
     ($($arg:tt)*) => {{

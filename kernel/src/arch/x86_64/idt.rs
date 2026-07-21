@@ -142,10 +142,17 @@ extern "C" fn interrupt_dispatch(frame: *mut TrapFrame) -> *mut TrapFrame {
     }
 
     let irq = (vector - u64::from(pic::IRQ_BASE)) as u8;
-    let next = if irq == 0 {
-        crate::sched::on_timer_tick(frame)
-    } else {
-        frame
+    let next = match irq {
+        0 => crate::sched::on_timer_tick(frame),
+        1 => {
+            crate::drivers::keyboard::handle_irq();
+            frame
+        }
+        12 => {
+            crate::drivers::mouse::handle_irq();
+            frame
+        }
+        _ => frame,
     };
     pic::send_eoi(irq);
     next

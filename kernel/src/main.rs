@@ -8,6 +8,7 @@
 extern crate alloc;
 
 mod arch;
+mod drivers;
 mod font;
 mod framebuffer;
 mod limine;
@@ -117,7 +118,18 @@ extern "C" fn kmain() -> ! {
     crate::serial_println!("scheduler: {} task(s) spawned", sched::task_count());
 
     arch::x86_64::pit::init(100);
-    arch::x86_64::pic::clear_mask(0);
+    arch::x86_64::pic::clear_mask(0); // timer
+    arch::x86_64::pic::clear_mask(1); // keyboard
+    crate::serial_println!("keyboard: IRQ1 unmasked");
+
+    if drivers::mouse::enable() {
+        arch::x86_64::pic::clear_mask(2); // cascade, needed for any PIC2 (8-15) IRQ
+        arch::x86_64::pic::clear_mask(12); // mouse
+        crate::serial_println!("mouse: enabled, IRQ12 unmasked");
+    } else {
+        crate::serial_println!("mouse: not detected, skipping");
+    }
+
     arch::x86_64::enable_interrupts();
     crate::serial_println!("interrupts enabled, 100 Hz timer running, entering idle loop");
 
