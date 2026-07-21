@@ -283,6 +283,10 @@ fn install_bundled_packages() {
         &pkg::build("counter", "0.1.0", COUNTER_ELF),
     );
     crate::serial_println!("pkg: installed 2 bundled package(s) into /apps");
+    gui::notifications::push(
+        gui::notifications::Kind::Success,
+        String::from("installed 2 bundled package(s)"),
+    );
 }
 
 static TASK_A_ITERS: AtomicU64 = AtomicU64::new(0);

@@ -116,6 +116,16 @@ pub fn installed() -> Vec<InstalledPackage> {
 /// feedback), or an error string on failure (bad package, bad ELF, or out
 /// of memory).
 pub fn run(file_name: &str) -> Result<String, String> {
+    let result = run_inner(file_name);
+    use crate::gui::notifications::{push, Kind};
+    match &result {
+        Ok(name) => push(Kind::Success, alloc::format!("launched {name}")),
+        Err(err) => push(Kind::Error, alloc::format!("launch failed: {err}")),
+    }
+    result
+}
+
+fn run_inner(file_name: &str) -> Result<String, String> {
     let elf_bytes = {
         let root = crate::fs::root().lock();
         let data = root

@@ -22,6 +22,7 @@ mod cursor;
 mod desktop;
 pub mod desktop_widgets;
 pub mod dock;
+pub mod notifications;
 pub mod topbar;
 pub mod widgets;
 pub mod window;
@@ -458,6 +459,7 @@ pub fn redraw() {
     // window -- same convention as a real desktop's menu bar/dock.
     topbar::render(screen_w);
     dock::render(&gui.windows, focused_id, screen_h, topbar::HEIGHT as i32);
+    notifications::render(screen_w as i32 - 16, topbar::HEIGHT as i32 + 12);
 
     if let Some((_, menu)) = &gui.context_menu {
         render_context_menu(menu);

@@ -274,6 +274,10 @@ impl FileManagerState {
                     let dest = format!("{TRASH_DIR}/{}", file_name(&path));
                     if root.rename(&path, &dest) {
                         self.status = format!("moved {} to Trash", file_name(&path));
+                        crate::gui::notifications::push(
+                            crate::gui::notifications::Kind::Info,
+                            self.status.clone(),
+                        );
                     }
                 }
             }
