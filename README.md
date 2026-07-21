@@ -5,7 +5,7 @@ Windows・macOS・Linux・Android のいいところを参考にした、完全�
 
 現在のマイルストーンや今後の計画は [ROADMAP.md](ROADMAP.md) を参照してください。
 
-## 現状 (M0〜M5 基本部分 完了)
+## 現状 (M0〜M6 基本部分 完了)
 
 - 独自64bitカーネル (Rust, `no_std` / stable toolchain, ナイトリー不要)
 - ブートローダーは [Limine](https://github.com/limine-bootloader/limine) を採用
@@ -29,9 +29,13 @@ Windows・macOS・Linux・Android のいいところを参考にした、完全�
   クリックでのフォーカス切り替え、タイトルバードラッグでのウィンドウ移動に対応。
   ターミナル(help/clear/uptime/mem/echoコマンド)と設定(ライブシステム情報)の
   組み込みウィジェットを搭載 — まだユーザーモードが無いため「アプリ」はカーネル内蔵
+- RTL8139 NICドライバ + 自前ネットワークスタック (`kernel/src/net/`) — Ethernet/ARP/IPv4/
+  ICMP/UDPを実装。DHCPクライアントでQEMU SLIRPから実際にIPアドレスを取得し、
+  ゲートウェイへのICMP ping・DNS問い合わせ(example.comの実際の名前解決)まで成功
+  (TCPは大規模なため今回は未実装。ROADMAP.md参照)
 - QEMU (BIOS/UEFI 両方) での起動・ヒープ動作・マルチタスク・キーボード/マウス入力・
-  ディスクI/O・ウィンドウのドラッグ操作/フォーカス切り替え/ターミナル操作を
-  スクリーンショット付きで実機確認済み
+  ディスクI/O・ウィンドウのドラッグ操作/フォーカス切り替え/ターミナル操作・
+  DHCP/ping/DNSによる実ネットワーク往復を実機確認済み
 
 ## リポジトリ構成
 
@@ -71,7 +75,8 @@ moon-os/
 │       │   ├── keyboard.rs         # PS/2キーボード (スキャンコード→ASCII)
 │       │   ├── mouse.rs            # PS/2マウス (3バイトパケット)
 │       │   ├── pci.rs              # PCIバス列挙 (0xCF8/0xCFC)
-│       │   └── ahci.rs             # AHCI (SATA) ドライバ
+│       │   ├── ahci.rs             # AHCI (SATA) ドライバ
+│       │   └── rtl8139.rs          # RTL8139 NICドライバ
 │       ├── fs/
 │       │   ├── mod.rs             # VFS (現状はRAMFS一枚のマウント)
 │       │   └── ramfs.rs            # インメモリファイルシステム
@@ -82,6 +87,14 @@ moon-os/
 │       │   └── widgets/
 │       │       ├── terminal.rs      # ターミナルウィジェット (組み込みコマンド)
 │       │       └── settings.rs      # 設定ウィジェット (ライブシステム情報)
+│       ├── net/
+│       │   ├── mod.rs             # NIC状態管理・送受信・デモ実行
+│       │   ├── arp.rs              # ARP (要求/応答/キャッシュ)
+│       │   ├── ipv4.rs             # IPv4ヘッダ・チェックサム・送信ルーティング
+│       │   ├── icmp.rs             # ICMP echo (ping送受信)
+│       │   ├── udp.rs              # UDP送受信 + ポート別受信箱
+│       │   ├── dhcp.rs             # DHCPクライアント
+│       │   └── dns.rs              # 簡易DNSリゾルバ (Aレコードのみ)
 │       └── sched.rs               # プリエンプティブ・ラウンドロビンスケジューラ
 └── tools/
     ├── build.sh              # カーネルビルド + ISO作成 (Limineは初回実行時に自動取得)
@@ -142,6 +155,17 @@ ramfs: files = ["/hello.txt"]
 ahci: found controller 8086:2922 at 00:1f.2 (ABAR=0xfebd5000)
 ahci: port 2 live, device = Atapi
 ahci: port 2 ATAPI read of LBA16 succeeded, ISO9660 PVD signature: CD001 (verified!)
+rtl8139: found controller 10ec:8139 at 00:02.0 (io_base=0xc000)
+rtl8139: mac=52:54:00:12:34:56
+net: mac=52:54:00:12:34:56
+dhcp: DISCOVER sent
+dhcp: OFFER 10.0.2.15
+dhcp: REQUEST sent
+dhcp: ACK, lease = 10.0.2.15
+net: configured ip=10.0.2.15 mask=255.255.255.0 gateway=10.0.2.2 dns=10.0.2.3
+icmp: echo reply from 10.0.2.2 seq=1
+net: ping to gateway 10.0.2.2 succeeded
+net: DNS example.com -> 104.20.23.154
 scheduler: 2 task(s) spawned
 keyboard: IRQ1 unmasked
 mouse: enabled, IRQ12 unmasked
@@ -152,17 +176,20 @@ interrupts enabled, 100 Hz timer running, entering idle loop
 [task A] iteration 200000000
 ```
 
-デバッグ用に、QEMUをGUIなしでシリアルログだけ確認したい場合:
+`tools/run.sh` は RTL8139 NIC (`-netdev user -device rtl8139`) を自動的に接続します。
+デバッグ用に、QEMUをGUIなしでシリアルログだけ確認したい場合 (NICも付ける場合):
 
 ```bash
 ./tools/build.sh
-qemu-system-x86_64 -M q35 -m 256M -cdrom build/moon-os.iso -serial stdio -display none -no-reboot -no-shutdown
+qemu-system-x86_64 -M q35 -m 256M -cdrom build/moon-os.iso \
+    -netdev user,id=net0 -device rtl8139,netdev=net0 \
+    -serial stdio -display none -no-reboot -no-shutdown
 ```
 
-## 次の開発ステップ (M6: ネットワーク)
+## 次の開発ステップ (M7: パッケージ管理 / アプリ基盤)
 
-- NIC ドライバ (virtio-net → 実 NIC)
-- TCP/IP スタック
-- DHCP / DNS
+- moon OS ネイティブアプリの実行形式定義
+- ユーザーモード + ELFローダー
+- パッケージマネージャー
 
 詳細は [ROADMAP.md](ROADMAP.md) を参照してください。

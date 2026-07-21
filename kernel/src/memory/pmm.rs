@@ -70,6 +70,37 @@ impl BitmapAllocator {
         None
     }
 
+    /// Finds `count` consecutive free frames (needed for DMA rings like the
+    /// RTL8139's RX buffer, which the hardware treats as one contiguous
+    /// physical region). Plain linear scan -- fine since this only runs a
+    /// handful of times, at driver init.
+    fn alloc_contiguous(&mut self, count: u64) -> Option<u64> {
+        if count == 0 {
+            return None;
+        }
+        let mut run_start = None;
+        let mut run_len = 0u64;
+        for frame in 0..self.frame_count {
+            if self.is_free(frame) {
+                if run_start.is_none() {
+                    run_start = Some(frame);
+                }
+                run_len += 1;
+                if run_len == count {
+                    let start = run_start.unwrap();
+                    for f in start..start + count {
+                        self.mark(f, true);
+                    }
+                    return Some(start * PAGE_SIZE);
+                }
+            } else {
+                run_start = None;
+                run_len = 0;
+            }
+        }
+        None
+    }
+
     fn free(&mut self, phys: u64) {
         self.mark(phys / PAGE_SIZE, false);
     }
@@ -132,6 +163,12 @@ pub fn init(memmap: &MemmapResponse) {
 
 pub fn alloc_frame() -> Option<u64> {
     PMM.lock().as_mut()?.alloc()
+}
+
+/// Allocates `count` physically contiguous 4K frames, returning the base
+/// address. See [`BitmapAllocator::alloc_contiguous`].
+pub fn alloc_contiguous(count: u64) -> Option<u64> {
+    PMM.lock().as_mut()?.alloc_contiguous(count)
 }
 
 pub fn free_frame(phys: u64) {

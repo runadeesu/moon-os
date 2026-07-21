@@ -11,6 +11,7 @@ qemu-system-x86_64 \
     -M q35 \
     -m 256M \
     -cdrom "$ISO" \
+    -netdev user,id=net0 -device rtl8139,netdev=net0 \
     -serial stdio \
     -no-reboot -no-shutdown \
     "$@"

@@ -15,6 +15,7 @@ mod fs;
 mod gui;
 mod limine;
 mod memory;
+mod net;
 mod sched;
 
 use alloc::string::{String, ToString};
@@ -158,6 +159,9 @@ extern "C" fn kmain() -> ! {
             }
         }
     }
+
+    net::init();
+    net::run_demo();
 
     sched::spawn(task_a);
     sched::spawn(task_b);
