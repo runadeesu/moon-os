@@ -179,3 +179,17 @@ pub fn format_mac(mac: MacAddr) -> alloc::string::String {
 pub fn format_ip(ip: Ipv4Addr) -> alloc::string::String {
     alloc::format!("{}.{}.{}.{}", ip[0], ip[1], ip[2], ip[3])
 }
+
+/// A short "NET ..." label for the desktop top bar: no NIC, no lease yet, or
+/// the actual configured address.
+pub fn status_summary() -> alloc::string::String {
+    if !is_up() {
+        return alloc::string::String::from("NET --");
+    }
+    let ip = our_ip();
+    if ip == UNSPECIFIED_IP {
+        alloc::string::String::from("NET (no lease)")
+    } else {
+        alloc::format!("NET {}", format_ip(ip))
+    }
+}

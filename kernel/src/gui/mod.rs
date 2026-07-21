@@ -11,13 +11,17 @@
 //! processes: moon OS has no usermode or ELF loader yet (that's M7/M8), so
 //! "applications" for now are kernel-side content the window manager draws.
 
-pub mod taskbar;
+mod desktop;
+pub mod desktop_widgets;
+pub mod dock;
+pub mod topbar;
 pub mod widgets;
 pub mod window;
 
 use crate::framebuffer;
 use alloc::string::String;
 use alloc::vec::Vec;
+use desktop::Star;
 use spin::Mutex;
 use widgets::{settings::SettingsState, terminal::TerminalState};
 use window::{Window, WindowContent};
@@ -30,6 +34,7 @@ struct GuiState {
     cursor_y: i32,
     dragging: Option<usize>,
     left_was_down: bool,
+    stars: Vec<Star>,
 }
 
 impl GuiState {
@@ -41,6 +46,7 @@ impl GuiState {
             cursor_y: 0,
             dragging: None,
             left_was_down: false,
+            stars: Vec::new(),
         }
     }
 }
@@ -57,15 +63,21 @@ pub fn init() {
     let mut gui = GUI.lock();
     gui.cursor_x = (screen_w / 2) as i32;
     gui.cursor_y = (screen_h / 2) as i32;
+    gui.stars = desktop::generate_stars(screen_w, screen_h, 150);
+
+    // Positioned clear of the top bar and the left dock; the right side is
+    // left open for the calendar/system-monitor desktop widgets.
+    let content_top = topbar::HEIGHT as i32 + 16;
+    let content_left = dock::WIDTH as i32 + 16;
 
     let id = gui.next_id;
     gui.next_id += 1;
     gui.windows.push(Window {
         id,
-        x: 40,
-        y: 30,
-        w: 420,
-        h: 220,
+        x: content_left,
+        y: content_top,
+        w: 460,
+        h: 260,
         title: String::from("Terminal"),
         content: WindowContent::Terminal(TerminalState::new()),
     });
@@ -74,8 +86,8 @@ pub fn init() {
     gui.next_id += 1;
     gui.windows.push(Window {
         id,
-        x: 500,
-        y: 50,
+        x: content_left,
+        y: content_top + 260 + 40,
         w: 300,
         h: 150,
         title: String::from("Settings"),
@@ -120,7 +132,12 @@ pub fn on_mouse(dx: i32, dy: i32, left: bool, _right: bool, _middle: bool) {
 
         if left && !gui.left_was_down {
             let (cx, cy) = (gui.cursor_x, gui.cursor_y);
-            if let Some(idx) = hit_test(&gui.windows, cx, cy) {
+            if cx < dock::WIDTH as i32 {
+                if let Some(idx) = dock::icon_at(gui.windows.len(), topbar::HEIGHT as i32, cx, cy) {
+                    let w = gui.windows.remove(idx);
+                    gui.windows.push(w);
+                }
+            } else if let Some(idx) = hit_test(&gui.windows, cx, cy) {
                 let w = gui.windows.remove(idx);
                 let starts_drag = w.title_bar_contains(cx, cy);
                 gui.windows.push(w);
@@ -149,16 +166,21 @@ pub fn redraw() {
     let gui = GUI.lock();
     let (screen_w, screen_h) = screen_size();
 
-    framebuffer::with(|c| {
-        c.fill_rect(0, 0, screen_w as u32, screen_h as u32, (0x14, 0x18, 0x22));
-    });
+    desktop::render(&gui.stars, screen_w, screen_h);
+    desktop_widgets::render(
+        screen_w as i32 - desktop_widgets::PANEL_W as i32 - 16,
+        topbar::HEIGHT as i32 + 16,
+    );
 
     let focused_id = gui.windows.last().map(|w| w.id);
-    taskbar::render(&gui.windows, focused_id, screen_w, screen_h);
-
     for w in gui.windows.iter() {
         w.render(Some(w.id) == focused_id);
     }
+
+    // The top bar and dock are OS chrome, always drawn above every app
+    // window -- same convention as a real desktop's menu bar/dock.
+    topbar::render(screen_w);
+    dock::render(&gui.windows, focused_id, screen_h, topbar::HEIGHT as i32);
 
     framebuffer::with(|c| {
         c.fill_rect(gui.cursor_x, gui.cursor_y, 4, 4, (0xFF, 0xFF, 0x40));

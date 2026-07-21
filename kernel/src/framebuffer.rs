@@ -9,6 +9,21 @@ use spin::Mutex;
 const GLYPH_W: usize = 8;
 const GLYPH_H: usize = 8;
 
+/// Integer square root (Newton's method), used by `fill_circle` -- no `sqrt`
+/// in `core` for a `no_std`/no-`libm` build.
+fn isqrt(n: i64) -> i64 {
+    if n <= 0 {
+        return 0;
+    }
+    let mut x = n;
+    let mut y = (x + 1) / 2;
+    while y < x {
+        x = y;
+        y = (x + n / x) / 2;
+    }
+    x
+}
+
 pub struct Console {
     fb: *mut u8,
     width: usize,
@@ -144,6 +159,91 @@ impl Console {
     ) {
         for (i, byte) in s.bytes().enumerate() {
             self.draw_char_at(x + (i * GLYPH_W) as i32, y, byte, fg, bg);
+        }
+    }
+
+    /// Unpacks the raw pixel at (x, y) back into 8-bit RGB. The inverse of
+    /// `pack`, used for alpha blending against whatever is already on screen.
+    fn get_pixel(&self, x: usize, y: usize) -> (u8, u8, u8) {
+        if x >= self.width || y >= self.height {
+            return (0, 0, 0);
+        }
+        let offset = y * self.pitch + x * self.bytes_per_pixel;
+        let raw: u32 = unsafe {
+            let ptr = self.fb.add(offset);
+            match self.bytes_per_pixel {
+                4 => core::ptr::read_volatile(ptr as *const u32),
+                3 => {
+                    let b0 = core::ptr::read_volatile(ptr) as u32;
+                    let b1 = core::ptr::read_volatile(ptr.add(1)) as u32;
+                    let b2 = core::ptr::read_volatile(ptr.add(2)) as u32;
+                    b0 | (b1 << 8) | (b2 << 16)
+                }
+                2 => core::ptr::read_volatile(ptr as *const u16) as u32,
+                _ => 0,
+            }
+        };
+        let unscale = |shift: u8, size: u8| -> u8 {
+            if size == 0 {
+                0
+            } else {
+                (((raw >> shift) & ((1u32 << size) - 1)) << (8 - size as u32)) as u8
+            }
+        };
+        (
+            unscale(self.red_shift, self.red_size),
+            unscale(self.green_shift, self.green_size),
+            unscale(self.blue_shift, self.blue_size),
+        )
+    }
+
+    /// Alpha-blends `color` over whatever is already on screen in the given
+    /// rect (0 = fully transparent no-op, 255 = opaque, same as `fill_rect`).
+    /// The glassy/translucent look of the top bar, dock, and desktop panels
+    /// all come from this rather than any real compositing buffer.
+    pub fn blend_rect(&mut self, x: i32, y: i32, w: u32, h: u32, color: (u8, u8, u8), alpha: u8) {
+        if alpha == 0 {
+            return;
+        }
+        if alpha == 255 {
+            self.fill_rect(x, y, w, h, color);
+            return;
+        }
+        let x0 = x.max(0) as usize;
+        let y0 = y.max(0) as usize;
+        let x1 = ((x as i64 + w as i64).max(0) as usize).min(self.width);
+        let y1 = ((y as i64 + h as i64).max(0) as usize).min(self.height);
+        let a = u32::from(alpha);
+        let mix =
+            |c: u8, b: u8| -> u8 { ((u32::from(c) * a + u32::from(b) * (255 - a)) / 255) as u8 };
+        for py in y0..y1 {
+            for px in x0..x1 {
+                let (br, bg, bb) = self.get_pixel(px, py);
+                let blended = (mix(color.0, br), mix(color.1, bg), mix(color.2, bb));
+                let packed = self.pack(blended.0, blended.1, blended.2);
+                self.put_pixel(px, py, packed);
+            }
+        }
+    }
+
+    /// Filled circle via horizontal scanline spans (integer-sqrt half-widths
+    /// per row) -- used for the moon and the top bar's crescent logo.
+    pub fn fill_circle(&mut self, cx: i32, cy: i32, radius: i32, color: (u8, u8, u8)) {
+        if radius <= 0 {
+            return;
+        }
+        let packed = self.pack(color.0, color.1, color.2);
+        for dy in -radius..=radius {
+            let py = cy + dy;
+            if py < 0 || py as usize >= self.height {
+                continue;
+            }
+            let span = isqrt((radius * radius - dy * dy).max(0) as i64) as i32;
+            let x0 = (cx - span).max(0) as usize;
+            let x1 = ((cx + span + 1).max(0) as usize).min(self.width);
+            for px in x0..x1 {
+                self.put_pixel(px, py as usize, packed);
+            }
         }
     }
 
