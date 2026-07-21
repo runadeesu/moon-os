@@ -69,6 +69,13 @@ impl RamFs {
         self.files.keys().map(String::as_str)
     }
 
+    /// Total bytes across every file currently in RAMFS -- real usage, not
+    /// a capacity/free-space figure (RAMFS just grows with the heap, there's
+    /// no fixed quota to report against).
+    pub fn used_bytes(&self) -> usize {
+        self.files.values().map(Vec::len).sum()
+    }
+
     pub fn mkdir(&mut self, path: &str) {
         self.ensure_parents(path);
         self.dirs.insert(String::from(path));

@@ -20,7 +20,22 @@ pub mod udp;
 
 use crate::drivers::rtl8139::Rtl8139;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 use spin::Mutex;
+
+/// Cumulative bytes moved through `send_frame`/`poll_once`, the two choke
+/// points every real send/receive already passes through -- used by the
+/// net-speed desktop widget to compute a real (if coarsely sampled) rate,
+/// not a made-up number.
+static TX_BYTES: AtomicU64 = AtomicU64::new(0);
+static RX_BYTES: AtomicU64 = AtomicU64::new(0);
+
+pub fn traffic_totals() -> (u64, u64) {
+    (
+        TX_BYTES.load(Ordering::Relaxed),
+        RX_BYTES.load(Ordering::Relaxed),
+    )
+}
 
 pub type MacAddr = [u8; 6];
 pub type Ipv4Addr = [u8; 4];
@@ -96,6 +111,7 @@ pub fn send_frame(dst_mac: MacAddr, ethertype: u16, payload: &[u8]) {
         frame.extend_from_slice(&src_mac);
         frame.extend_from_slice(&ethertype.to_be_bytes());
         frame.extend_from_slice(payload);
+        TX_BYTES.fetch_add(frame.len() as u64, Ordering::Relaxed);
         nic.send(&frame);
     }
 }
@@ -113,6 +129,7 @@ pub fn poll_once() {
     let Some(frame) = frame else {
         return;
     };
+    RX_BYTES.fetch_add(frame.len() as u64, Ordering::Relaxed);
     if frame.len() < 14 {
         return;
     }
