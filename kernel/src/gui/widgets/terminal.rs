@@ -15,6 +15,11 @@ const LINE_HEIGHT: i32 = 10;
 pub struct TerminalState {
     lines: VecDeque<String>,
     current: String,
+    /// Previously entered commands, oldest first -- `Up`/`Down` walk this.
+    history: Vec<String>,
+    /// Index into `history` while browsing with `Up`/`Down`; `None` means
+    /// the input line is fresh (not currently recalling a past command).
+    history_pos: Option<usize>,
 }
 
 impl TerminalState {
@@ -24,6 +29,8 @@ impl TerminalState {
         Self {
             lines,
             current: String::new(),
+            history: Vec::new(),
+            history_pos: None,
         }
     }
 
@@ -32,12 +39,53 @@ impl TerminalState {
             b'\n' => {
                 let line = core::mem::take(&mut self.current);
                 self.push_line(alloc::format!("> {}", line));
+                if !line.trim().is_empty() {
+                    self.history.push(line.clone());
+                }
+                self.history_pos = None;
                 self.run_command(&line);
             }
             0x08 => {
                 self.current.pop();
+                self.history_pos = None;
             }
-            0x20..=0x7E => self.current.push(ch as char),
+            0x20..=0x7E => {
+                self.current.push(ch as char);
+                self.history_pos = None;
+            }
+            _ => {}
+        }
+    }
+
+    /// Arrow-key command-history recall: `Up` steps back to older
+    /// commands, `Down` steps forward (and back to a blank line once past
+    /// the newest recalled entry).
+    pub fn handle_special_key(&mut self, key: super::super::SpecialKey) {
+        use super::super::SpecialKey;
+        if self.history.is_empty() {
+            return;
+        }
+        match key {
+            SpecialKey::Up => {
+                let next = match self.history_pos {
+                    Some(0) => 0,
+                    Some(p) => p - 1,
+                    None => self.history.len() - 1,
+                };
+                self.history_pos = Some(next);
+                self.current = self.history[next].clone();
+            }
+            SpecialKey::Down => match self.history_pos {
+                Some(p) if p + 1 < self.history.len() => {
+                    self.history_pos = Some(p + 1);
+                    self.current = self.history[p + 1].clone();
+                }
+                Some(_) => {
+                    self.history_pos = None;
+                    self.current.clear();
+                }
+                None => {}
+            },
             _ => {}
         }
     }

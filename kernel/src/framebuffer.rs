@@ -5,6 +5,8 @@
 use crate::font::FONT8X8;
 use crate::font_hiragana::FONT8X8_HIRAGANA;
 use crate::limine::Framebuffer;
+use alloc::vec;
+use alloc::vec::Vec;
 use spin::Mutex;
 
 const GLYPH_W: usize = 8;
@@ -43,7 +45,16 @@ fn isqrt(n: i64) -> i64 {
 }
 
 pub struct Console {
+    /// The real, memory-mapped hardware framebuffer -- only ever touched by
+    /// `present()`. Every drawing primitive targets `back` instead, so a
+    /// whole redraw (dozens of separate fill/blend calls) builds up
+    /// off-screen and only becomes visible in one shot, instead of the
+    /// screen showing every intermediate half-drawn state (visible tearing/
+    /// flicker, confirmed by screendump during development: ambient redraws
+    /// could catch anywhere from "background only" to "some windows drawn,
+    /// some not").
     fb: *mut u8,
+    back: Vec<u8>,
     width: usize,
     height: usize,
     pitch: usize,
@@ -72,11 +83,13 @@ impl Console {
     unsafe fn new(fb: &Framebuffer) -> Self {
         let width = fb.width as usize;
         let height = fb.height as usize;
+        let pitch = fb.pitch as usize;
         Self {
             fb: fb.address,
+            back: vec![0u8; pitch * height],
             width,
             height,
-            pitch: fb.pitch as usize,
+            pitch,
             bytes_per_pixel: (fb.bpp as usize) / 8,
             red_shift: fb.red_mask_shift,
             red_size: fb.red_mask_size,
@@ -229,17 +242,12 @@ impl Console {
             return (0, 0, 0);
         }
         let offset = y * self.pitch + x * self.bytes_per_pixel;
-        let raw: u32 = unsafe {
-            let ptr = self.fb.add(offset);
+        let raw: u32 = {
+            let b = &self.back[offset..];
             match self.bytes_per_pixel {
-                4 => core::ptr::read_volatile(ptr as *const u32),
-                3 => {
-                    let b0 = core::ptr::read_volatile(ptr) as u32;
-                    let b1 = core::ptr::read_volatile(ptr.add(1)) as u32;
-                    let b2 = core::ptr::read_volatile(ptr.add(2)) as u32;
-                    b0 | (b1 << 8) | (b2 << 16)
-                }
-                2 => core::ptr::read_volatile(ptr as *const u16) as u32,
+                4 => u32::from_le_bytes([b[0], b[1], b[2], b[3]]),
+                3 => u32::from(b[0]) | (u32::from(b[1]) << 8) | (u32::from(b[2]) << 16),
+                2 => u32::from(u16::from_le_bytes([b[0], b[1]])),
                 _ => 0,
             }
         };
@@ -368,18 +376,27 @@ impl Console {
             return;
         }
         let offset = y * self.pitch + x * self.bytes_per_pixel;
-        unsafe {
-            let ptr = self.fb.add(offset);
-            match self.bytes_per_pixel {
-                4 => core::ptr::write_volatile(ptr as *mut u32, color),
-                3 => {
-                    core::ptr::write_volatile(ptr, color as u8);
-                    core::ptr::write_volatile(ptr.add(1), (color >> 8) as u8);
-                    core::ptr::write_volatile(ptr.add(2), (color >> 16) as u8);
-                }
-                2 => core::ptr::write_volatile(ptr as *mut u16, color as u16),
-                _ => {}
+        let b = &mut self.back[offset..];
+        match self.bytes_per_pixel {
+            4 => b[..4].copy_from_slice(&color.to_le_bytes()),
+            3 => {
+                b[0] = color as u8;
+                b[1] = (color >> 8) as u8;
+                b[2] = (color >> 16) as u8;
             }
+            2 => b[..2].copy_from_slice(&(color as u16).to_le_bytes()),
+            _ => {}
+        }
+    }
+
+    /// Blits the whole backbuffer to the real hardware framebuffer in one
+    /// shot -- the single point where drawing actually becomes visible.
+    /// Called once at the end of a full GUI redraw, not after each
+    /// individual draw call, so the display never shows a half-composited
+    /// frame.
+    pub fn present(&mut self) {
+        unsafe {
+            core::ptr::copy_nonoverlapping(self.back.as_ptr(), self.fb, self.back.len());
         }
     }
 
@@ -413,13 +430,8 @@ impl Console {
     fn scroll(&mut self) {
         let row_bytes = self.pitch * GLYPH_H;
         let total_rows_px = self.rows * GLYPH_H;
-        unsafe {
-            core::ptr::copy(
-                self.fb.add(row_bytes),
-                self.fb,
-                self.pitch * (total_rows_px - GLYPH_H),
-            );
-        }
+        self.back
+            .copy_within(row_bytes..self.pitch * total_rows_px, 0);
         self.clear_row(self.rows - 1);
     }
 
@@ -466,6 +478,7 @@ pub unsafe fn init(fb: &Framebuffer) {
     for row in 0..console.rows {
         console.clear_row(row);
     }
+    console.present();
     *CONSOLE.lock() = Some(console);
 }
 

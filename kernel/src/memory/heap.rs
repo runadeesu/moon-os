@@ -13,7 +13,12 @@ use super::pmm;
 /// HHDM (Limine typically puts that around 0xffff800000000000): plenty of
 /// higher-half address space is unused and free for us to claim.
 const HEAP_START: u64 = 0xffff_ffff_9000_0000;
-const HEAP_SIZE: u64 = 4 * 1024 * 1024;
+/// 4 MiB was plenty before the GUI grew a framebuffer backbuffer (see
+/// `framebuffer::Console::back`) -- at 1280x800x32bpp that's already ~3.9
+/// MiB on its own, permanently. 32 MiB leaves generous headroom for that
+/// plus RAMFS files, process images, and everything still to come, well
+/// within the 256 MiB QEMU is given (`tools/run.sh`).
+const HEAP_SIZE: u64 = 32 * 1024 * 1024;
 const PAGE_SIZE: u64 = 4096;
 
 struct FreeNode {

@@ -38,13 +38,31 @@ fn send_mouse_command(cmd: u8) -> bool {
     matches!(ps2::read_data(), Some(0xFA))
 }
 
+/// Bit 3 of a packet's first byte is always set on a real PS/2 mouse --
+/// the one fixed marker we have to find (or keep) alignment with the
+/// 3-byte packet stream.
+const SYNC_BIT: u8 = 0x08;
+
 /// Called from the IRQ12 handler with one byte of a 3-byte packet.
+///
+/// Framing is checked on every byte 0 candidate, not just after a full
+/// packet is assembled: if a byte is ever dropped or duplicated (plausible
+/// under bursty input -- rapid programmatic mouse events, a missed IRQ),
+/// grouping blindly into fixed 3-byte windows would lock onto the wrong
+/// offset *permanently*, since nothing after that ever re-checks alignment
+/// mid-stream. Rejecting an invalid byte 0 without advancing keeps
+/// re-trying at the next byte until sync is found again, so a one-off
+/// framing glitch degrades input for at most a couple of bytes instead of
+/// wedging the mouse dead for the rest of the session.
 pub fn handle_irq() {
     let Some(byte) = ps2::read_data() else {
         return;
     };
 
     let idx = PACKET_INDEX.load(Ordering::Relaxed);
+    if idx == 0 && byte & SYNC_BIT == 0 {
+        return; // not a valid packet start; drop and try the next byte
+    }
     unsafe { PACKET[idx as usize] = byte };
 
     if idx < 2 {
@@ -58,8 +76,15 @@ pub fn handle_irq() {
 fn process_packet() {
     let packet = unsafe { PACKET };
     let flags = packet[0];
-    if flags & 0x08 == 0 {
-        return; // not a valid first byte; drop and resync on the next one
+
+    // Bits 6/7 mark X/Y overflow -- a real mouse only sets these on a
+    // movement far too large for one packet to encode, which never
+    // legitimately happens under emulation. In practice this fires on a
+    // mis-framed packet (a byte 0 candidate that happened to have the sync
+    // bit set by coincidence); dropping it here is cheap insurance on top
+    // of the byte-0 resync in `handle_irq`.
+    if flags & 0xC0 != 0 {
+        return;
     }
 
     let mut dx = i32::from(packet[1]);

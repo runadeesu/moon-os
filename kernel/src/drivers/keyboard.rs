@@ -4,8 +4,20 @@
 //! is flowing end to end; a real input-event queue comes with the GUI work.
 
 use super::ps2;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 const DATA_PORT_RELEASE_BIT: u8 = 0x80;
+
+const SCANCODE_ALT: u8 = 0x38;
+const SCANCODE_TAB: u8 = 0x0F;
+const SCANCODE_UP: u8 = 0x48;
+const SCANCODE_DOWN: u8 = 0x50;
+const SCANCODE_LEFT: u8 = 0x4B;
+const SCANCODE_RIGHT: u8 = 0x4D;
+const EXTENDED_PREFIX: u8 = 0xE0;
+
+static ALT_DOWN: AtomicBool = AtomicBool::new(false);
+static PENDING_EXTENDED: AtomicBool = AtomicBool::new(false);
 
 const SCANCODE_ASCII: [u8; 128] = {
     let mut table = [0u8; 128];
@@ -70,11 +82,44 @@ pub fn handle_irq() {
         return;
     };
 
-    if scancode & DATA_PORT_RELEASE_BIT != 0 {
-        return; // key release, no state to track yet
+    if scancode == EXTENDED_PREFIX {
+        PENDING_EXTENDED.store(true, Ordering::Relaxed);
+        return;
+    }
+    let extended = PENDING_EXTENDED.swap(false, Ordering::Relaxed);
+
+    let released = scancode & DATA_PORT_RELEASE_BIT != 0;
+    let code = scancode & !DATA_PORT_RELEASE_BIT;
+
+    if code == SCANCODE_ALT {
+        ALT_DOWN.store(!released, Ordering::Relaxed);
+        return;
     }
 
-    let ascii = SCANCODE_ASCII.get(scancode as usize).copied().unwrap_or(0);
+    if released {
+        return; // key release, no other state to track yet
+    }
+
+    if extended {
+        let key = match code {
+            SCANCODE_UP => Some(crate::gui::SpecialKey::Up),
+            SCANCODE_DOWN => Some(crate::gui::SpecialKey::Down),
+            SCANCODE_LEFT => Some(crate::gui::SpecialKey::Left),
+            SCANCODE_RIGHT => Some(crate::gui::SpecialKey::Right),
+            _ => None,
+        };
+        if let Some(key) = key {
+            crate::gui::on_special_key(key);
+        }
+        return;
+    }
+
+    if code == SCANCODE_TAB && ALT_DOWN.load(Ordering::Relaxed) {
+        crate::gui::on_special_key(crate::gui::SpecialKey::AltTab);
+        return;
+    }
+
+    let ascii = SCANCODE_ASCII.get(code as usize).copied().unwrap_or(0);
     if ascii != 0 {
         crate::serial_print!("{}", ascii as char);
         crate::gui::on_key(ascii);

@@ -155,7 +155,11 @@ extern "C" fn interrupt_dispatch(frame: *mut TrapFrame) -> *mut TrapFrame {
 
     let irq = (vector - u64::from(pic::IRQ_BASE)) as u8;
     let next = match irq {
-        0 => crate::sched::on_timer_tick(frame),
+        0 => {
+            let next = crate::sched::on_timer_tick(frame);
+            crate::gui::on_tick(crate::sched::ticks());
+            next
+        }
         1 => {
             crate::drivers::keyboard::handle_irq();
             frame
