@@ -5,7 +5,7 @@ Windows・macOS・Linux・Android のいいところを参考にした、完全�
 
 現在のマイルストーンや今後の計画は [ROADMAP.md](ROADMAP.md) を参照してください。
 
-## 現状 (M0: プロジェクト基盤)
+## 現状 (M0: プロジェクト基盤 / M1: メモリ管理 完了)
 
 - 独自64bitカーネル (Rust, `no_std` / stable toolchain, ナイトリー不要)
 - ブートローダーは [Limine](https://github.com/limine-bootloader/limine) を採用
@@ -16,7 +16,9 @@ Windows・macOS・Linux・Android のいいところを参考にした、完全�
 - GDT / TSS (ダブルフォルト用 IST 付き)
 - IDT + CPU例外ハンドラ (0〜31番, `#[naked]` トランポリン方式)
 - フレームバッファへのテキストコンソール描画 (8x8 パブリックドメインフォント使用、自前スクロール実装)
-- QEMU (BIOS/UEFI 両方) での起動を実機確認済み
+- 物理メモリアロケータ (ビットマップ方式)、独自ページテーブル操作 (`map`/`unmap`/`translate`)、
+  カーネルヒープ (`#[global_allocator]`、自前フリーリストアロケータ) — `Vec` / `Box` などが使用可能
+- QEMU (BIOS/UEFI 両方) での起動・ヒープ動作を実機確認済み
 
 ## リポジトリ構成
 
@@ -36,12 +38,17 @@ moon-os/
 │       ├── limine.rs          # Limine Boot Protocol の自前バインディング
 │       ├── font.rs             # 8x8 ビットマップフォント (パブリックドメイン)
 │       ├── framebuffer.rs      # フレームバッファテキストコンソール
-│       └── arch/x86_64/
-│           ├── mod.rs
-│           ├── port.rs          # I/Oポートアクセス
-│           ├── serial.rs        # 16550 UART (COM1) ドライバ
-│           ├── gdt.rs           # GDT / TSS
-│           └── idt.rs           # IDT / CPU例外ハンドラ
+│       ├── arch/x86_64/
+│       │   ├── mod.rs
+│       │   ├── port.rs          # I/Oポートアクセス
+│       │   ├── serial.rs        # 16550 UART (COM1) ドライバ
+│       │   ├── gdt.rs           # GDT / TSS
+│       │   └── idt.rs           # IDT / CPU例外ハンドラ
+│       └── memory/
+│           ├── mod.rs            # HHDMオフセット管理・phys_to_virt
+│           ├── pmm.rs             # 物理メモリアロケータ (ビットマップ)
+│           ├── paging.rs          # ページテーブル操作 (map/unmap/translate)
+│           └── heap.rs            # カーネルヒープ (#[global_allocator])
 └── tools/
     ├── build.sh              # カーネルビルド + ISO作成 (Limineは初回実行時に自動取得)
     └── run.sh                # ISOをQEMUで起動
@@ -91,7 +98,9 @@ QEMUのウィンドウにはフレームバッファコンソールでバナー�
 moon OS kernel booting...
 bootloader: Limine 9.6.7
 HHDM offset: 0xffff800000000000
-memory map: 16 entries, 254 MiB usable
+pmm: 255 MiB total, 254 MiB free (65382 4K frames)
+heap: mapped and handed to the global allocator
+heap self-test: Vec<u32> of 16 squares, sum=1240
 framebuffer: 1280x800 @ 32 bpp
 kernel init complete, halting.
 ```
@@ -103,10 +112,11 @@ kernel init complete, halting.
 qemu-system-x86_64 -M q35 -m 256M -cdrom build/moon-os.iso -serial stdio -display none -no-reboot -no-shutdown
 ```
 
-## 次の開発ステップ (M1: メモリ管理)
+## 次の開発ステップ (M2: 割り込み・マルチタスク)
 
-- 物理メモリアロケータ (ビットマップ)
-- ページテーブル操作 (仮想メモリマネージャ)
-- カーネルヒープ + `#[global_allocator]`
+- PIC/APIC 初期化 (Local APIC, I/O APIC)
+- PIT/HPET タイマー割り込み
+- プロセス/スレッド構造体 + コンテキストスイッチ
+- ラウンドロビンスケジューラ
 
 詳細は [ROADMAP.md](ROADMAP.md) を参照してください。

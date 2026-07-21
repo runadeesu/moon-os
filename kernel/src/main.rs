@@ -1,11 +1,19 @@
 #![no_std]
 #![no_main]
+// Early-bring-up kernel: memory.rs already exposes the full pmm/paging API
+// (free_frame, unmap, translate, ...) that later milestones (heap growth,
+// process teardown, page-fault handling) will call.
+#![allow(dead_code)]
+
+extern crate alloc;
 
 mod arch;
 mod font;
 mod framebuffer;
 mod limine;
+mod memory;
 
+use alloc::vec::Vec;
 use core::panic::PanicInfo;
 
 #[used]
@@ -54,24 +62,38 @@ extern "C" fn kmain() -> ! {
         crate::serial_println!("bootloader: {} {}", info.name(), info.version());
     }
 
-    if let Some(hhdm) = HHDM_REQUEST.response() {
-        crate::serial_println!("HHDM offset: {:#x}", hhdm.offset);
-    }
+    let hhdm = HHDM_REQUEST
+        .response()
+        .unwrap_or_else(|| fatal("no HHDM response from bootloader"));
+    crate::serial_println!("HHDM offset: {:#x}", hhdm.offset);
+    memory::set_hhdm_offset(hhdm.offset);
 
-    if let Some(memmap) = MEMMAP_REQUEST.response() {
-        let mut usable_bytes: u64 = 0;
-        for entry_ptr in memmap.entries() {
-            let entry = unsafe { &**entry_ptr };
-            if entry.entry_type() == limine::MemmapEntryType::Usable {
-                usable_bytes += entry.length;
-            }
-        }
-        crate::serial_println!(
-            "memory map: {} entries, {} MiB usable",
-            memmap.entry_count,
-            usable_bytes / (1024 * 1024)
-        );
+    let memmap = MEMMAP_REQUEST
+        .response()
+        .unwrap_or_else(|| fatal("no memory map response from bootloader"));
+    memory::pmm::init(memmap);
+    let stats = memory::pmm::stats();
+    crate::serial_println!(
+        "pmm: {} MiB total, {} MiB free ({} 4K frames)",
+        (stats.total_frames * 4096) / (1024 * 1024),
+        (stats.free_frames * 4096) / (1024 * 1024),
+        stats.total_frames
+    );
+
+    memory::heap::init();
+    crate::serial_println!("heap: mapped and handed to the global allocator");
+
+    let mut v: Vec<u32> = Vec::new();
+    for i in 0..16 {
+        v.push(i * i);
     }
+    let sum: u32 = v.iter().sum();
+    crate::serial_println!(
+        "heap self-test: Vec<u32> of {} squares, sum={}",
+        v.len(),
+        sum
+    );
+    drop(v);
 
     match FRAMEBUFFER_REQUEST
         .response()
@@ -82,13 +104,18 @@ extern "C" fn kmain() -> ! {
             crate::serial_println!("framebuffer: {}x{} @ {} bpp", fb.width, fb.height, fb.bpp);
             unsafe { framebuffer::init(fb) };
             crate::fb_println!("moon OS");
-            crate::fb_println!("kernel M0 milestone: booted via Limine into 64-bit long mode");
-            crate::fb_println!("GDT/TSS, IDT, and this framebuffer console are alive.");
+            crate::fb_println!("kernel M1 milestone: PMM + paging + heap allocator are alive");
+            crate::fb_println!("heap self-test: Vec<u32> of {} squares, sum={}", 16, sum);
         }
         None => crate::serial_println!("no framebuffer available"),
     }
 
     crate::serial_println!("kernel init complete, halting.");
+    halt();
+}
+
+fn fatal(message: &str) -> ! {
+    crate::serial_println!("FATAL: {}", message);
     halt();
 }
 
