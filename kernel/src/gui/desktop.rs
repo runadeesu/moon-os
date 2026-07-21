@@ -127,4 +127,15 @@ pub fn render(stars: &[Star], screen_w: usize, screen_h: usize) {
             c.fill_rect(x, sh - h, 1, h as u32, (0x08, 0x0A, 0x14));
         }
     });
+
+    // A faint cyan scanline pattern over everything -- a cheap, very subtle
+    // CRT/HUD texture that reads as "futuristic" without repainting the
+    // whole scene at a different color.
+    framebuffer::with(|c| {
+        let mut sy = 0;
+        while sy < sh {
+            c.blend_rect(0, sy, screen_w as u32, 1, (0x40, 0xE0, 0xFF), 10);
+            sy += 3;
+        }
+    });
 }

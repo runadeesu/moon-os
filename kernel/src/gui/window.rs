@@ -49,34 +49,51 @@ impl Window {
         }
     }
 
+    /// `x`/`y` are local to the content area (below the title bar) --
+    /// forwarded here from `gui::on_mouse` for clicks that land inside a
+    /// window's body rather than its title bar.
+    pub fn handle_click(&mut self, x: i32, y: i32) {
+        if let WindowContent::Settings(settings) = &mut self.content {
+            settings.handle_click(x, y);
+        }
+    }
+
+    /// The title text: fixed "Terminal" for the terminal (a technical term
+    /// left untranslated, like a real desktop keeps app/protocol names), and
+    /// `crate::i18n`-translated for Settings.
+    fn title_bytes(&self) -> &'static [u8] {
+        match &self.content {
+            WindowContent::Terminal(_) => b"Terminal",
+            WindowContent::Settings(_) => crate::i18n::tr(crate::i18n::Key::SettingsTitle),
+        }
+    }
+
     pub fn render(&self, focused: bool) {
-        let border = if focused {
-            (0x50, 0x90, 0xE0)
-        } else {
-            (0x50, 0x50, 0x58)
-        };
+        const NEON: (u8, u8, u8) = (0x30, 0xE0, 0xFF);
+        let border = if focused { NEON } else { (0x50, 0x50, 0x58) };
         let title_bg = if focused {
-            (0x1E, 0x50, 0x90)
+            (0x0C, 0x28, 0x38)
         } else {
             (0x30, 0x30, 0x38)
         };
+        let outer_h = self.total_height() as u32 + 2;
 
         framebuffer::with(|c| {
-            c.fill_rect(
-                self.x - 1,
-                self.y - 1,
-                self.w + 2,
-                self.total_height() as u32 + 2,
-                border,
-            );
+            if focused {
+                c.glow_border(self.x - 1, self.y - 1, self.w + 2, outer_h, NEON);
+            }
+            c.fill_rect(self.x - 1, self.y - 1, self.w + 2, outer_h, border);
             c.fill_rect(self.x, self.y, self.w, TITLE_BAR_HEIGHT as u32, title_bg);
-            c.draw_str_at(
+            c.draw_glyphs_at(
                 self.x + 4,
                 self.y + 5,
-                &self.title,
+                self.title_bytes(),
                 (0xFF, 0xFF, 0xFF),
                 None,
             );
+            if focused {
+                c.draw_corner_brackets(self.x - 1, self.y - 1, self.w + 2, outer_h, NEON);
+            }
         });
 
         let content_y = self.y + TITLE_BAR_HEIGHT;

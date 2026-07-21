@@ -3,11 +3,29 @@
 //! the kernel is alive with more than a serial log.
 
 use crate::font::FONT8X8;
+use crate::font_hiragana::FONT8X8_HIRAGANA;
 use crate::limine::Framebuffer;
 use spin::Mutex;
 
 const GLYPH_W: usize = 8;
 const GLYPH_H: usize = 8;
+
+/// Looks up the 8x8 bitmap for a glyph byte: 0x00-0x7F is plain ASCII (the
+/// `font.rs` table); 0x80-0xDF addresses the 96-entry hiragana table
+/// (`font_hiragana.rs`) at `byte - 0x80`, the encoding `i18n.rs` uses for
+/// translated labels. Out-of-range bytes fall back to '?'.
+fn glyph_bits(ch: u8) -> &'static [u8; 8] {
+    if ch < 0x80 {
+        &FONT8X8[ch as usize]
+    } else {
+        let idx = (ch - 0x80) as usize;
+        if idx < FONT8X8_HIRAGANA.len() {
+            &FONT8X8_HIRAGANA[idx]
+        } else {
+            &FONT8X8[b'?' as usize]
+        }
+    }
+}
 
 /// Integer square root (Newton's method), used by `fill_circle` -- no `sqrt`
 /// in `core` for a `no_std`/no-`libm` build.
@@ -113,7 +131,14 @@ impl Console {
 
     /// Pixel-precise single-glyph draw. `bg` of `None` leaves background
     /// pixels untouched (useful for overlaying text on something already
-    /// drawn, e.g. a title bar).
+    /// drawn, e.g. a title bar). `ch` is looked up via `glyph_bits`, so
+    /// values 0x80+ render hiragana rather than falling back to '?'.
+    ///
+    /// After the crisp 1-bit glyph, a second pass lightly blends the
+    /// foreground color onto empty cells touching a set bit -- a cheap
+    /// stand-in for real anti-aliasing (there's no coverage data in a 1bpp
+    /// font to downsample from) that softens the stair-stepped edges into
+    /// less of a blocky look.
     pub fn draw_char_at(
         &mut self,
         x: i32,
@@ -122,11 +147,7 @@ impl Console {
         fg: (u8, u8, u8),
         bg: Option<(u8, u8, u8)>,
     ) {
-        let glyph = if (ch as usize) < FONT8X8.len() {
-            &FONT8X8[ch as usize]
-        } else {
-            &FONT8X8[b'?' as usize]
-        };
+        let glyph = glyph_bits(ch);
         let fg_color = self.pack(fg.0, fg.1, fg.2);
         let bg_color = bg.map(|c| self.pack(c.0, c.1, c.2));
         for (dy, bits) in glyph.iter().enumerate() {
@@ -146,6 +167,28 @@ impl Console {
                 }
             }
         }
+
+        const HALO_ALPHA: u8 = 80;
+        let bit_set = |dx: i32, dy: i32| -> bool {
+            if !(0..GLYPH_W as i32).contains(&dx) || !(0..GLYPH_H as i32).contains(&dy) {
+                return false;
+            }
+            (glyph[dy as usize] >> dx) & 1 != 0
+        };
+        for dy in 0..GLYPH_H as i32 {
+            for dx in 0..GLYPH_W as i32 {
+                if bit_set(dx, dy) {
+                    continue;
+                }
+                if bit_set(dx - 1, dy)
+                    || bit_set(dx + 1, dy)
+                    || bit_set(dx, dy - 1)
+                    || bit_set(dx, dy + 1)
+                {
+                    self.blend_pixel(x + dx, y + dy, fg, HALO_ALPHA);
+                }
+            }
+        }
     }
 
     /// Pixel-precise string draw, left-to-right, 8px advance per character.
@@ -158,6 +201,23 @@ impl Console {
         bg: Option<(u8, u8, u8)>,
     ) {
         for (i, byte) in s.bytes().enumerate() {
+            self.draw_char_at(x + (i * GLYPH_W) as i32, y, byte, fg, bg);
+        }
+    }
+
+    /// Like `draw_str_at`, but over a raw byte slice instead of a `&str` --
+    /// needed for translated labels (`i18n::tr`), which encode hiragana
+    /// glyphs as bytes 0x80+ that would not be valid UTF-8 inside a real
+    /// `str`.
+    pub fn draw_glyphs_at(
+        &mut self,
+        x: i32,
+        y: i32,
+        bytes: &[u8],
+        fg: (u8, u8, u8),
+        bg: Option<(u8, u8, u8)>,
+    ) {
+        for (i, &byte) in bytes.iter().enumerate() {
             self.draw_char_at(x + (i * GLYPH_W) as i32, y, byte, fg, bg);
         }
     }
@@ -197,6 +257,31 @@ impl Console {
         )
     }
 
+    /// Alpha-blends `color` over whatever's already at (x, y) (0 = fully
+    /// transparent no-op, 255 = opaque, same as `put_pixel`). The building
+    /// block both `blend_rect` and the soft-text halo are made of.
+    fn blend_pixel(&mut self, x: i32, y: i32, color: (u8, u8, u8), alpha: u8) {
+        if alpha == 0 || x < 0 || y < 0 {
+            return;
+        }
+        let (x, y) = (x as usize, y as usize);
+        if x >= self.width || y >= self.height {
+            return;
+        }
+        if alpha == 255 {
+            let packed = self.pack(color.0, color.1, color.2);
+            self.put_pixel(x, y, packed);
+            return;
+        }
+        let a = u32::from(alpha);
+        let (br, bg, bb) = self.get_pixel(x, y);
+        let mix =
+            |c: u8, b: u8| -> u8 { ((u32::from(c) * a + u32::from(b) * (255 - a)) / 255) as u8 };
+        let blended = (mix(color.0, br), mix(color.1, bg), mix(color.2, bb));
+        let packed = self.pack(blended.0, blended.1, blended.2);
+        self.put_pixel(x, y, packed);
+    }
+
     /// Alpha-blends `color` over whatever is already on screen in the given
     /// rect (0 = fully transparent no-op, 255 = opaque, same as `fill_rect`).
     /// The glassy/translucent look of the top bar, dock, and desktop panels
@@ -209,21 +294,52 @@ impl Console {
             self.fill_rect(x, y, w, h, color);
             return;
         }
-        let x0 = x.max(0) as usize;
-        let y0 = y.max(0) as usize;
-        let x1 = ((x as i64 + w as i64).max(0) as usize).min(self.width);
-        let y1 = ((y as i64 + h as i64).max(0) as usize).min(self.height);
-        let a = u32::from(alpha);
-        let mix =
-            |c: u8, b: u8| -> u8 { ((u32::from(c) * a + u32::from(b) * (255 - a)) / 255) as u8 };
+        let x0 = x.max(0);
+        let y0 = y.max(0);
+        let x1 = (x as i64 + w as i64).max(0) as i32;
+        let y1 = (y as i64 + h as i64).max(0) as i32;
         for py in y0..y1 {
             for px in x0..x1 {
-                let (br, bg, bb) = self.get_pixel(px, py);
-                let blended = (mix(color.0, br), mix(color.1, bg), mix(color.2, bb));
-                let packed = self.pack(blended.0, blended.1, blended.2);
-                self.put_pixel(px, py, packed);
+                self.blend_pixel(px, py, color, alpha);
             }
         }
+    }
+
+    /// A soft neon-glow edge: concentric 1px outlines stepping outward from
+    /// the rect at decreasing alpha. Used for the futuristic glowing window
+    /// borders/panel accents instead of a single flat outline.
+    pub fn glow_border(&mut self, x: i32, y: i32, w: u32, h: u32, color: (u8, u8, u8)) {
+        for (ring, alpha) in [(1i32, 150u8), (2, 85), (3, 40)] {
+            let gx = x - ring;
+            let gy = y - ring;
+            let gw = w as i32 + 2 * ring;
+            let gh = h as i32 + 2 * ring;
+            self.blend_rect(gx, gy, gw as u32, ring as u32, color, alpha);
+            self.blend_rect(gx, gy + gh - ring, gw as u32, ring as u32, color, alpha);
+            self.blend_rect(gx, gy, ring as u32, gh as u32, color, alpha);
+            self.blend_rect(gx + gw - ring, gy, ring as u32, gh as u32, color, alpha);
+        }
+    }
+
+    /// Four L-shaped accent marks at the corners of a rect -- a sci-fi
+    /// HUD/targeting-reticle touch, drawn on the focused window.
+    pub fn draw_corner_brackets(&mut self, x: i32, y: i32, w: u32, h: u32, color: (u8, u8, u8)) {
+        let len = 10u32;
+        let thick = 2i32;
+        let right = x + w as i32;
+        let bottom = y + h as i32;
+        // top-left
+        self.fill_rect(x, y, len, thick as u32, color);
+        self.fill_rect(x, y, thick as u32, len, color);
+        // top-right
+        self.fill_rect(right - len as i32, y, len, thick as u32, color);
+        self.fill_rect(right - thick, y, thick as u32, len, color);
+        // bottom-left
+        self.fill_rect(x, bottom - thick, len, thick as u32, color);
+        self.fill_rect(x, bottom - len as i32, thick as u32, len, color);
+        // bottom-right
+        self.fill_rect(right - len as i32, bottom - thick, len, thick as u32, color);
+        self.fill_rect(right - thick, bottom - len as i32, thick as u32, len, color);
     }
 
     /// Filled circle via horizontal scanline spans (integer-sqrt half-widths

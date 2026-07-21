@@ -5,12 +5,17 @@
 use crate::framebuffer;
 
 pub const HEIGHT: u32 = 26;
+const NEON: (u8, u8, u8) = (0x30, 0xE0, 0xFF);
 
 pub fn render(screen_w: usize) {
     let bg = (0x0A, 0x0C, 0x18);
 
     framebuffer::with(|c| {
         c.blend_rect(0, 0, screen_w as u32, HEIGHT, bg, 215);
+        // A thin glowing edge along the bottom -- the HUD-panel look
+        // carries through the top bar, dock, and desktop widget panels.
+        c.blend_rect(0, HEIGHT as i32, screen_w as u32, 1, NEON, 130);
+        c.blend_rect(0, HEIGHT as i32 + 1, screen_w as u32, 1, NEON, 55);
 
         // Crescent logo: a bright disc with a smaller disc punched out in
         // the bar's own (flat) background color.

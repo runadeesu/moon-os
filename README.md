@@ -35,6 +35,16 @@ Windows・macOS・Linux・Android のいいところを参考にした、完全�
   ウィンドウ切り替え)、右上にカレンダー(実日付、Zellerの公式で曜日計算)と
   システムモニターの半透明ウィジェットパネル。半透明表現は `framebuffer::blend_rect`
   による実アルファブレンド(既存ピクセルを読み戻して合成)
+- 多言語UI (`kernel/src/i18n.rs`) — 設定ウィンドウの「Lang」行をクリックすると
+  英語/日本語/スペイン語/フランス語を切り替え可能(切り替えると即座に再描画される)。
+  日本語ラベルは`kernel/src/font_hiragana.rs`(dhepper/font8x8由来のパブリックドメイン
+  ひらがなビットマップ96字)を使い全てひらがな表記 — 漢字/カタカナ用フォントはまだ無いため
+- 文字描画のソフト化 — `framebuffer::draw_char_at` が1bitグリフの縁に低アルファのハロー
+  (縁取りブレンド)を追加し、擬似アンチエイリアスでカクカク感を軽減
+- 未来感のあるUIクロム — ウィンドウ枠・ドック・トップバー・デスクトップウィジェットに
+  `framebuffer::glow_border`(同心円状の半透明アウトライン)によるネオングロー、
+  フォーカスウィンドウの四隅に`draw_corner_brackets`(HUD風Lブラケット)、
+  壁紙全体にごく薄いスキャンライン効果を追加
 - RTL8139 NICドライバ + 自前ネットワークスタック (`kernel/src/net/`) — Ethernet/ARP/IPv4/
   ICMP/UDPを実装。DHCPクライアントでQEMU SLIRPから実際にIPアドレスを取得し、
   ゲートウェイへのICMP ping・DNS問い合わせ(example.comの実際の名前解決)まで成功
@@ -59,8 +69,10 @@ moon-os/
 │   └── src/
 │       ├── main.rs            # エントリポイント (kmain)
 │       ├── limine.rs          # Limine Boot Protocol の自前バインディング
-│       ├── font.rs             # 8x8 ビットマップフォント (パブリックドメイン)
-│       ├── framebuffer.rs      # フレームバッファテキストコンソール
+│       ├── font.rs             # 8x8 ASCIIビットマップフォント (パブリックドメイン)
+│       ├── font_hiragana.rs    # 8x8 ひらがなビットマップフォント (パブリックドメイン)
+│       ├── i18n.rs             # UI多言語対応 (英語/日本語/スペイン語/フランス語)
+│       ├── framebuffer.rs      # フレームバッファ描画 (blend/glow/ソフトテキスト含む)
 │       ├── arch/x86_64/
 │       │   ├── mod.rs
 │       │   ├── port.rs          # I/Oポートアクセス

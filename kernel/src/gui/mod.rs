@@ -138,8 +138,15 @@ pub fn on_mouse(dx: i32, dy: i32, left: bool, _right: bool, _middle: bool) {
                     gui.windows.push(w);
                 }
             } else if let Some(idx) = hit_test(&gui.windows, cx, cy) {
-                let w = gui.windows.remove(idx);
+                let w = &gui.windows[idx];
                 let starts_drag = w.title_bar_contains(cx, cy);
+                let content_click =
+                    (!starts_drag).then_some((cx - w.x, cy - w.y - window::TITLE_BAR_HEIGHT));
+
+                let mut w = gui.windows.remove(idx);
+                if let Some((lx, ly)) = content_click {
+                    w.handle_click(lx, ly);
+                }
                 gui.windows.push(w);
                 if starts_drag {
                     gui.dragging = Some(gui.windows.len() - 1);
