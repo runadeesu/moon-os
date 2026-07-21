@@ -5,7 +5,7 @@ Windows・macOS・Linux・Android のいいところを参考にした、完全�
 
 現在のマイルストーンや今後の計画は [ROADMAP.md](ROADMAP.md) を参照してください。
 
-## 現状 (M0: プロジェクト基盤 / M1: メモリ管理 完了)
+## 現状 (M0/M1/M2 完了)
 
 - 独自64bitカーネル (Rust, `no_std` / stable toolchain, ナイトリー不要)
 - ブートローダーは [Limine](https://github.com/limine-bootloader/limine) を採用
@@ -18,7 +18,9 @@ Windows・macOS・Linux・Android のいいところを参考にした、完全�
 - フレームバッファへのテキストコンソール描画 (8x8 パブリックドメインフォント使用、自前スクロール実装)
 - 物理メモリアロケータ (ビットマップ方式)、独自ページテーブル操作 (`map`/`unmap`/`translate`)、
   カーネルヒープ (`#[global_allocator]`、自前フリーリストアロケータ) — `Vec` / `Box` などが使用可能
-- QEMU (BIOS/UEFI 両方) での起動・ヒープ動作を実機確認済み
+- 8259 PIC リマップ + PIT タイマー割り込み (100Hz) + プリエンプティブなラウンドロビンスケジューラ
+  (`kernel/src/sched.rs`) — 専用コンテキストスイッチコードなしで `iretq` の仕組みを流用
+- QEMU (BIOS/UEFI 両方) での起動・ヒープ動作・マルチタスク動作を実機確認済み
 
 ## リポジトリ構成
 
@@ -43,12 +45,15 @@ moon-os/
 │       │   ├── port.rs          # I/Oポートアクセス
 │       │   ├── serial.rs        # 16550 UART (COM1) ドライバ
 │       │   ├── gdt.rs           # GDT / TSS
-│       │   └── idt.rs           # IDT / CPU例外ハンドラ
-│       └── memory/
-│           ├── mod.rs            # HHDMオフセット管理・phys_to_virt
-│           ├── pmm.rs             # 物理メモリアロケータ (ビットマップ)
-│           ├── paging.rs          # ページテーブル操作 (map/unmap/translate)
-│           └── heap.rs            # カーネルヒープ (#[global_allocator])
+│       │   ├── idt.rs           # IDT / CPU例外ハンドラ / IRQディスパッチ
+│       │   ├── pic.rs           # 8259 PIC (リマップ + マスク制御)
+│       │   └── pit.rs           # PIT タイマー (スケジューラ用ティック)
+│       ├── memory/
+│       │   ├── mod.rs            # HHDMオフセット管理・phys_to_virt
+│       │   ├── pmm.rs             # 物理メモリアロケータ (ビットマップ)
+│       │   ├── paging.rs          # ページテーブル操作 (map/unmap/translate)
+│       │   └── heap.rs            # カーネルヒープ (#[global_allocator])
+│       └── sched.rs               # プリエンプティブ・ラウンドロビンスケジューラ
 └── tools/
     ├── build.sh              # カーネルビルド + ISO作成 (Limineは初回実行時に自動取得)
     └── run.sh                # ISOをQEMUで起動
@@ -102,7 +107,12 @@ pmm: 255 MiB total, 254 MiB free (65382 4K frames)
 heap: mapped and handed to the global allocator
 heap self-test: Vec<u32> of 16 squares, sum=1240
 framebuffer: 1280x800 @ 32 bpp
-kernel init complete, halting.
+scheduler: 2 task(s) spawned
+interrupts enabled, 100 Hz timer running, entering idle loop
+[task A] iteration 100000000
+[task B] iteration 100000000
+[task B] iteration 200000000
+[task A] iteration 200000000
 ```
 
 デバッグ用に、QEMUをGUIなしでシリアルログだけ確認したい場合:
@@ -112,11 +122,10 @@ kernel init complete, halting.
 qemu-system-x86_64 -M q35 -m 256M -cdrom build/moon-os.iso -serial stdio -display none -no-reboot -no-shutdown
 ```
 
-## 次の開発ステップ (M2: 割り込み・マルチタスク)
+## 次の開発ステップ (M3: 入力デバイス)
 
-- PIC/APIC 初期化 (Local APIC, I/O APIC)
-- PIT/HPET タイマー割り込み
-- プロセス/スレッド構造体 + コンテキストスイッチ
-- ラウンドロビンスケジューラ
+- PS/2 キーボードドライバ
+- PS/2 マウスドライバ
+- USB スタック (xHCI) は将来のマイルストーンで対応
 
 詳細は [ROADMAP.md](ROADMAP.md) を参照してください。

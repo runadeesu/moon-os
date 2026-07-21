@@ -1,11 +1,16 @@
-//! Interrupt Descriptor Table and CPU exception handling.
+//! Interrupt Descriptor Table: CPU exceptions (vectors 0-31) and the legacy
+//! PIC's hardware IRQs (remapped to vectors 32-47).
 //!
 //! Rust's `x86-interrupt` calling convention is nightly-only, so each vector
 //! gets a small `#[naked]` trampoline (stable since Rust 1.88) that pushes a
 //! normalized frame and jumps to one shared handler, which saves the
-//! general-purpose registers and calls into safe Rust.
+//! general-purpose registers and calls into safe Rust. That handler returns
+//! the stack pointer to resume from, which is ordinarily the same frame it
+//! was given -- except on a timer tick, where the scheduler may hand back a
+//! *different* task's saved frame, which is how context switches happen.
 
 use super::gdt::KERNEL_CODE_SELECTOR;
+use super::pic;
 use core::arch::naked_asm;
 use core::mem::size_of;
 
@@ -48,11 +53,25 @@ struct DescriptorTablePointer {
     base: u64,
 }
 
+const VECTOR_COUNT: usize = 48;
+
 static mut IDT: [IdtEntry; 256] = [IdtEntry::MISSING; 256];
 
-/// Register saved by the common stub, in the order it pushes them, followed
+/// Registers saved by the common stub, in the order it pushes them, followed
 /// by the normalized (vector, error_code) pair and the frame the CPU itself
-/// pushes on exception entry (no privilege change, so no user rsp/ss here).
+/// pushes on exception entry.
+///
+/// Even returning to the same privilege level, x86-64's `iretq` always
+/// consumes all five trailing fields here (RIP, CS, RFLAGS, RSP, SS) -- unlike
+/// legacy 32-bit `iret`, it does not conditionally skip RSP/SS. A hand-built
+/// frame that only fills in the first three gets whatever garbage follows
+/// misread as the new stack pointer and segment, which faults as a bogus
+/// #GP the moment `iretq` runs.
+///
+/// A suspended task's entire state is one of these sitting at the top of its
+/// own kernel stack -- resuming it is just pointing `rsp` back at it and
+/// running the second half of the common stub, indistinguishable from
+/// returning from a real interrupt.
 #[repr(C)]
 pub struct TrapFrame {
     pub rax: u64,
@@ -75,6 +94,8 @@ pub struct TrapFrame {
     pub rip: u64,
     pub cs: u64,
     pub rflags: u64,
+    pub rsp: u64,
+    pub ss: u64,
 }
 
 const EXCEPTION_NAMES: [&str; 32] = [
@@ -112,7 +133,25 @@ const EXCEPTION_NAMES: [&str; 32] = [
     "Reserved",
 ];
 
-extern "C" fn exception_dispatch(frame: *mut TrapFrame) {
+extern "C" fn interrupt_dispatch(frame: *mut TrapFrame) -> *mut TrapFrame {
+    let vector = unsafe { (*frame).vector };
+
+    if vector < 32 {
+        handle_exception(frame);
+        return frame;
+    }
+
+    let irq = (vector - u64::from(pic::IRQ_BASE)) as u8;
+    let next = if irq == 0 {
+        crate::sched::on_timer_tick(frame)
+    } else {
+        frame
+    };
+    pic::send_eoi(irq);
+    next
+}
+
+fn handle_exception(frame: *mut TrapFrame) {
     let frame = unsafe { &*frame };
     let vector = frame.vector as usize;
     let name = EXCEPTION_NAMES.get(vector).copied().unwrap_or("Unknown");
@@ -172,6 +211,7 @@ extern "C" fn common_stub() {
         "push rax",
         "mov rdi, rsp",
         "call {dispatch}",
+        "mov rsp, rax", // dispatch returns the frame to resume (maybe a new task)
         "pop rax",
         "pop rbx",
         "pop rcx",
@@ -189,11 +229,11 @@ extern "C" fn common_stub() {
         "pop r15",
         "add rsp, 16", // drop vector + error_code
         "iretq",
-        dispatch = sym exception_dispatch,
+        dispatch = sym interrupt_dispatch,
     )
 }
 
-macro_rules! exception_stub {
+macro_rules! interrupt_stub {
     ($name:ident, $vector:literal, false) => {
         #[unsafe(naked)]
         extern "C" fn $name() {
@@ -219,47 +259,65 @@ macro_rules! exception_stub {
     };
 }
 
-exception_stub!(stub_00, 0, false);
-exception_stub!(stub_01, 1, false);
-exception_stub!(stub_02, 2, false);
-exception_stub!(stub_03, 3, false);
-exception_stub!(stub_04, 4, false);
-exception_stub!(stub_05, 5, false);
-exception_stub!(stub_06, 6, false);
-exception_stub!(stub_07, 7, false);
-exception_stub!(stub_08, 8, true);
-exception_stub!(stub_09, 9, false);
-exception_stub!(stub_10, 10, true);
-exception_stub!(stub_11, 11, true);
-exception_stub!(stub_12, 12, true);
-exception_stub!(stub_13, 13, true);
-exception_stub!(stub_14, 14, true);
-exception_stub!(stub_15, 15, false);
-exception_stub!(stub_16, 16, false);
-exception_stub!(stub_17, 17, true);
-exception_stub!(stub_18, 18, false);
-exception_stub!(stub_19, 19, false);
-exception_stub!(stub_20, 20, false);
-exception_stub!(stub_21, 21, true);
-exception_stub!(stub_22, 22, false);
-exception_stub!(stub_23, 23, false);
-exception_stub!(stub_24, 24, false);
-exception_stub!(stub_25, 25, false);
-exception_stub!(stub_26, 26, false);
-exception_stub!(stub_27, 27, false);
-exception_stub!(stub_28, 28, false);
-exception_stub!(stub_29, 29, true);
-exception_stub!(stub_30, 30, true);
-exception_stub!(stub_31, 31, false);
+interrupt_stub!(stub_00, 0, false);
+interrupt_stub!(stub_01, 1, false);
+interrupt_stub!(stub_02, 2, false);
+interrupt_stub!(stub_03, 3, false);
+interrupt_stub!(stub_04, 4, false);
+interrupt_stub!(stub_05, 5, false);
+interrupt_stub!(stub_06, 6, false);
+interrupt_stub!(stub_07, 7, false);
+interrupt_stub!(stub_08, 8, true);
+interrupt_stub!(stub_09, 9, false);
+interrupt_stub!(stub_10, 10, true);
+interrupt_stub!(stub_11, 11, true);
+interrupt_stub!(stub_12, 12, true);
+interrupt_stub!(stub_13, 13, true);
+interrupt_stub!(stub_14, 14, true);
+interrupt_stub!(stub_15, 15, false);
+interrupt_stub!(stub_16, 16, false);
+interrupt_stub!(stub_17, 17, true);
+interrupt_stub!(stub_18, 18, false);
+interrupt_stub!(stub_19, 19, false);
+interrupt_stub!(stub_20, 20, false);
+interrupt_stub!(stub_21, 21, true);
+interrupt_stub!(stub_22, 22, false);
+interrupt_stub!(stub_23, 23, false);
+interrupt_stub!(stub_24, 24, false);
+interrupt_stub!(stub_25, 25, false);
+interrupt_stub!(stub_26, 26, false);
+interrupt_stub!(stub_27, 27, false);
+interrupt_stub!(stub_28, 28, false);
+interrupt_stub!(stub_29, 29, true);
+interrupt_stub!(stub_30, 30, true);
+interrupt_stub!(stub_31, 31, false);
+// IRQ0-15 (remapped to vectors 32-47), no CPU-pushed error code on any of them.
+interrupt_stub!(stub_32, 32, false);
+interrupt_stub!(stub_33, 33, false);
+interrupt_stub!(stub_34, 34, false);
+interrupt_stub!(stub_35, 35, false);
+interrupt_stub!(stub_36, 36, false);
+interrupt_stub!(stub_37, 37, false);
+interrupt_stub!(stub_38, 38, false);
+interrupt_stub!(stub_39, 39, false);
+interrupt_stub!(stub_40, 40, false);
+interrupt_stub!(stub_41, 41, false);
+interrupt_stub!(stub_42, 42, false);
+interrupt_stub!(stub_43, 43, false);
+interrupt_stub!(stub_44, 44, false);
+interrupt_stub!(stub_45, 45, false);
+interrupt_stub!(stub_46, 46, false);
+interrupt_stub!(stub_47, 47, false);
 
 const DOUBLE_FAULT_VECTOR: usize = 8;
 
 pub fn init() {
-    let stubs: [extern "C" fn(); 32] = [
+    let stubs: [extern "C" fn(); VECTOR_COUNT] = [
         stub_00, stub_01, stub_02, stub_03, stub_04, stub_05, stub_06, stub_07, stub_08, stub_09,
         stub_10, stub_11, stub_12, stub_13, stub_14, stub_15, stub_16, stub_17, stub_18, stub_19,
         stub_20, stub_21, stub_22, stub_23, stub_24, stub_25, stub_26, stub_27, stub_28, stub_29,
-        stub_30, stub_31,
+        stub_30, stub_31, stub_32, stub_33, stub_34, stub_35, stub_36, stub_37, stub_38, stub_39,
+        stub_40, stub_41, stub_42, stub_43, stub_44, stub_45, stub_46, stub_47,
     ];
 
     unsafe {

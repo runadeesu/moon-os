@@ -12,9 +12,11 @@ mod font;
 mod framebuffer;
 mod limine;
 mod memory;
+mod sched;
 
 use alloc::vec::Vec;
 use core::panic::PanicInfo;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 #[used]
 #[link_section = ".requests_start_marker"]
@@ -104,14 +106,43 @@ extern "C" fn kmain() -> ! {
             crate::serial_println!("framebuffer: {}x{} @ {} bpp", fb.width, fb.height, fb.bpp);
             unsafe { framebuffer::init(fb) };
             crate::fb_println!("moon OS");
-            crate::fb_println!("kernel M1 milestone: PMM + paging + heap allocator are alive");
+            crate::fb_println!("kernel M2 milestone: preemptive round-robin scheduler is alive");
             crate::fb_println!("heap self-test: Vec<u32> of {} squares, sum={}", 16, sum);
         }
         None => crate::serial_println!("no framebuffer available"),
     }
 
-    crate::serial_println!("kernel init complete, halting.");
+    sched::spawn(task_a);
+    sched::spawn(task_b);
+    crate::serial_println!("scheduler: {} task(s) spawned", sched::task_count());
+
+    arch::x86_64::pit::init(100);
+    arch::x86_64::pic::clear_mask(0);
+    arch::x86_64::enable_interrupts();
+    crate::serial_println!("interrupts enabled, 100 Hz timer running, entering idle loop");
+
     halt();
+}
+
+static TASK_A_ITERS: AtomicU64 = AtomicU64::new(0);
+static TASK_B_ITERS: AtomicU64 = AtomicU64::new(0);
+
+extern "C" fn task_a() -> ! {
+    loop {
+        let n = TASK_A_ITERS.fetch_add(1, Ordering::Relaxed);
+        if n.is_multiple_of(100_000_000) {
+            crate::serial_println!("[task A] iteration {}", n);
+        }
+    }
+}
+
+extern "C" fn task_b() -> ! {
+    loop {
+        let n = TASK_B_ITERS.fetch_add(1, Ordering::Relaxed);
+        if n.is_multiple_of(100_000_000) {
+            crate::serial_println!("[task B] iteration {}", n);
+        }
+    }
 }
 
 fn fatal(message: &str) -> ! {
