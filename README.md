@@ -1,0 +1,112 @@
+# moon OS
+
+Windows・macOS・Linux・Android のいいところを参考にした、完全オリジナルの64bit OS。
+学習用のトイOSではなく、実際に動作する完成品を目指す長期プロジェクトです。
+
+現在のマイルストーンや今後の計画は [ROADMAP.md](ROADMAP.md) を参照してください。
+
+## 現状 (M0: プロジェクト基盤)
+
+- 独自64bitカーネル (Rust, `no_std` / stable toolchain, ナイトリー不要)
+- ブートローダーは [Limine](https://github.com/limine-bootloader/limine) を採用
+  (BIOS/UEFI 両対応, 自作ではなく実績のあるOSSブートローダーを利用する設計判断。詳細は ROADMAP.md 参照)
+- Limine Boot Protocol バインディングは自前実装 (`kernel/src/limine.rs`) — `limine` crate は
+  nightly 限定の `ptr_metadata` feature に依存するため使わず、stable Rust で完結させています
+- シリアル (COM1) ログ出力
+- GDT / TSS (ダブルフォルト用 IST 付き)
+- IDT + CPU例外ハンドラ (0〜31番, `#[naked]` トランポリン方式)
+- フレームバッファへのテキストコンソール描画 (8x8 パブリックドメインフォント使用、自前スクロール実装)
+- QEMU (BIOS/UEFI 両方) での起動を実機確認済み
+
+## リポジトリ構成
+
+```
+moon-os/
+├── Cargo.toml              # ワークスペース定義 + プロファイル設定
+├── .cargo/config.toml      # x86_64-unknown-none をデフォルトターゲットに設定
+├── ROADMAP.md               # 開発ロードマップ（マイルストーン管理）
+├── boot/
+│   └── limine.conf          # Limine ブートローダー設定
+├── kernel/                  # カーネル本体 (Rust, no_std)
+│   ├── Cargo.toml
+│   ├── build.rs              # リンカスクリプトの指定
+│   ├── linker.ld              # 上位半分 (higher-half) カーネル用リンカスクリプト
+│   └── src/
+│       ├── main.rs            # エントリポイント (kmain)
+│       ├── limine.rs          # Limine Boot Protocol の自前バインディング
+│       ├── font.rs             # 8x8 ビットマップフォント (パブリックドメイン)
+│       ├── framebuffer.rs      # フレームバッファテキストコンソール
+│       └── arch/x86_64/
+│           ├── mod.rs
+│           ├── port.rs          # I/Oポートアクセス
+│           ├── serial.rs        # 16550 UART (COM1) ドライバ
+│           ├── gdt.rs           # GDT / TSS
+│           └── idt.rs           # IDT / CPU例外ハンドラ
+└── tools/
+    ├── build.sh              # カーネルビルド + ISO作成 (Limineは初回実行時に自動取得)
+    └── run.sh                # ISOをQEMUで起動
+```
+
+## 開発環境のセットアップ
+
+Windows 11 上で開発する場合、`xorriso` / `make` / `gcc` などLinux向けツールチェーンが
+必要になるため、**WSL2 (Ubuntu) の利用を強く推奨**します。
+
+### WSL2 (Ubuntu) 上でのセットアップ
+
+```bash
+# 必要パッケージ
+sudo apt update
+sudo apt install -y build-essential nasm xorriso mtools qemu-system-x86 git curl
+
+# Rust (未インストールの場合)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
+
+# ベアメタルターゲットを追加 (stable channel でOK、nightly不要)
+rustup target add x86_64-unknown-none
+```
+
+VS Code は WSL 拡張機能 (`Remote - WSL`) 経由でこの環境を直接開けます。
+QEMU の画面表示には X11 サーバー (WSLg は標準で動作) が必要です。
+
+## ビルド & 実行
+
+```bash
+# ビルドのみ (build/moon-os.iso が生成される)
+./tools/build.sh
+
+# ビルド + QEMU起動 (シリアル出力はそのままターミナルに流れます)
+./tools/run.sh
+```
+
+初回実行時、`tools/build.sh` は Limine (バイナリリリース) を `third_party/limine/` に
+`git clone` し、Limineのホスト側デプロイツール (`limine`) をその場でビルドします。
+このディレクトリと `build/`, `target/` は `.gitignore` 対象で、リポジトリには含まれません。
+
+正常に起動すると、シリアルコンソール (ターミナル) に以下のようなログが出力され、
+QEMUのウィンドウにはフレームバッファコンソールでバナーが描画されます。
+
+```
+moon OS kernel booting...
+bootloader: Limine 9.6.7
+HHDM offset: 0xffff800000000000
+memory map: 16 entries, 254 MiB usable
+framebuffer: 1280x800 @ 32 bpp
+kernel init complete, halting.
+```
+
+デバッグ用に、QEMUをGUIなしでシリアルログだけ確認したい場合:
+
+```bash
+./tools/build.sh
+qemu-system-x86_64 -M q35 -m 256M -cdrom build/moon-os.iso -serial stdio -display none -no-reboot -no-shutdown
+```
+
+## 次の開発ステップ (M1: メモリ管理)
+
+- 物理メモリアロケータ (ビットマップ)
+- ページテーブル操作 (仮想メモリマネージャ)
+- カーネルヒープ + `#[global_allocator]`
+
+詳細は [ROADMAP.md](ROADMAP.md) を参照してください。
