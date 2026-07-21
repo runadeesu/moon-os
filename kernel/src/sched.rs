@@ -144,6 +144,27 @@ pub fn task_count() -> usize {
     SCHED.lock().tasks.len()
 }
 
+/// A task's id and whether it's a ring-3 process (has its own address
+/// space) or a kernel task -- real, current scheduler state, for the Task
+/// Manager widget. No per-task CPU-time accounting exists yet, so there's
+/// no CPU% column; showing one would mean making up a number.
+pub struct TaskInfo {
+    pub id: u64,
+    pub is_user: bool,
+}
+
+pub fn list_tasks() -> alloc::vec::Vec<TaskInfo> {
+    SCHED
+        .lock()
+        .tasks
+        .iter()
+        .map(|t| TaskInfo {
+            id: t.id,
+            is_user: t._address_space.is_some(),
+        })
+        .collect()
+}
+
 /// Called from the timer IRQ handler. Returns the [`TrapFrame`] to resume
 /// into: either the same one that was interrupted (nothing to switch to
 /// yet), or the next task's in round-robin order.

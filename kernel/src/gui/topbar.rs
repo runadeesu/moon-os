@@ -5,6 +5,12 @@
 use crate::framebuffer;
 
 pub const HEIGHT: u32 = 26;
+/// Width of the clickable "moon OS" logo zone that opens the app launcher.
+pub const LOGO_ZONE_W: i32 = 96;
+
+pub fn logo_contains(x: i32, y: i32) -> bool {
+    (0..LOGO_ZONE_W).contains(&x) && (0..HEIGHT as i32).contains(&y)
+}
 
 pub fn render(screen_w: usize) {
     let bg = (0x0A, 0x0C, 0x18);

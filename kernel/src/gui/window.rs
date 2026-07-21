@@ -12,7 +12,9 @@
 //! change than this pass makes.
 
 use super::widgets::{
-    files::FileManagerState, settings::SettingsState, store::StoreState, terminal::TerminalState,
+    calculator::CalculatorState, files::FileManagerState, notes::NotesState,
+    settings::SettingsState, store::StoreState, taskmanager::TaskManagerState,
+    terminal::TerminalState,
 };
 use crate::framebuffer;
 use alloc::string::String;
@@ -33,6 +35,9 @@ pub enum WindowContent {
     Settings(SettingsState),
     Files(FileManagerState),
     Store(StoreState),
+    Notes(NotesState),
+    Calculator(CalculatorState),
+    TaskManager(TaskManagerState),
 }
 
 impl WindowContent {
@@ -170,7 +175,10 @@ impl Window {
             // unwired, so search wasn't a real feature, just a display.
             WindowContent::Files(files) => files.handle_char(ch),
             WindowContent::Store(store) => store.handle_char(ch),
-            WindowContent::Settings(_) => {}
+            WindowContent::Notes(notes) => notes.handle_char(ch),
+            WindowContent::Settings(_)
+            | WindowContent::Calculator(_)
+            | WindowContent::TaskManager(_) => {}
         }
     }
 
@@ -188,7 +196,10 @@ impl Window {
             WindowContent::Settings(settings) => settings.handle_click(x, y),
             WindowContent::Files(files) => files.handle_click(x, y),
             WindowContent::Store(store) => store.handle_click(x, y),
-            WindowContent::Terminal(_) => {}
+            WindowContent::Calculator(calc) => calc.handle_click(x, y),
+            WindowContent::Terminal(_)
+            | WindowContent::Notes(_)
+            | WindowContent::TaskManager(_) => {}
         }
     }
 
@@ -211,6 +222,9 @@ impl Window {
             WindowContent::Settings(_) => crate::i18n::tr(crate::i18n::Key::SettingsTitle),
             WindowContent::Files(_) => b"File Manager",
             WindowContent::Store(_) => b"Moon Store",
+            WindowContent::Notes(_) => b"Notes",
+            WindowContent::Calculator(_) => b"Calculator",
+            WindowContent::TaskManager(_) => b"Task Manager",
         }
     }
 
@@ -297,6 +311,9 @@ impl Window {
             WindowContent::Settings(settings) => settings.render(self.x, content_y, self.w, self.h),
             WindowContent::Files(files) => files.render(self.x, content_y, self.w, self.h),
             WindowContent::Store(store) => store.render(self.x, content_y, self.w, self.h),
+            WindowContent::Notes(notes) => notes.render(self.x, content_y, self.w, self.h),
+            WindowContent::Calculator(calc) => calc.render(self.x, content_y, self.w, self.h),
+            WindowContent::TaskManager(tm) => tm.render(self.x, content_y, self.w, self.h),
         }
 
         // Open/close flash: a whole-window overlay whose alpha ramps down

@@ -34,9 +34,89 @@ use alloc::vec::Vec;
 use desktop::Star;
 use spin::Mutex;
 use widgets::{
-    files::FileManagerState, settings::SettingsState, store::StoreState, terminal::TerminalState,
+    calculator::CalculatorState, files::FileManagerState, notes::NotesState,
+    settings::SettingsState, store::StoreState, taskmanager::TaskManagerState,
+    terminal::TerminalState,
 };
 use window::{TitleButton, Window, WindowContent};
+
+/// Every app the Moon-button launcher can open. `Store`/`Files`/`Terminal`/
+/// `Settings` also exist as the windows already open at boot; picking one
+/// from the menu when it's already open just focuses it instead of spawning
+/// a second copy, same as clicking a running app's dock icon would.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AppKind {
+    Terminal,
+    Settings,
+    Files,
+    Store,
+    Notes,
+    Calculator,
+    TaskManager,
+}
+
+impl AppKind {
+    const ALL: [AppKind; 7] = [
+        AppKind::Terminal,
+        AppKind::Settings,
+        AppKind::Files,
+        AppKind::Store,
+        AppKind::Notes,
+        AppKind::Calculator,
+        AppKind::TaskManager,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            AppKind::Terminal => "Terminal",
+            AppKind::Settings => "Settings",
+            AppKind::Files => "Files",
+            AppKind::Store => "Moon Store",
+            AppKind::Notes => "Notes",
+            AppKind::Calculator => "Calculator",
+            AppKind::TaskManager => "Task Manager",
+        }
+    }
+
+    /// Matches a window's dock-letter `title` field back to the app kind it
+    /// was spawned as, so the launcher can focus an already-open window
+    /// instead of piling up duplicates.
+    fn dock_title(self) -> &'static str {
+        match self {
+            AppKind::Terminal => "Terminal",
+            AppKind::Settings => "Settings",
+            AppKind::Files => "Files",
+            AppKind::Store => "Moon",
+            AppKind::Notes => "Notes",
+            AppKind::Calculator => "Calc",
+            AppKind::TaskManager => "Jobs",
+        }
+    }
+
+    fn new_content(self) -> WindowContent {
+        match self {
+            AppKind::Terminal => WindowContent::Terminal(TerminalState::new()),
+            AppKind::Settings => WindowContent::Settings(SettingsState),
+            AppKind::Files => WindowContent::Files(FileManagerState::new()),
+            AppKind::Store => WindowContent::Store(StoreState::new()),
+            AppKind::Notes => WindowContent::Notes(NotesState::new()),
+            AppKind::Calculator => WindowContent::Calculator(CalculatorState::new()),
+            AppKind::TaskManager => WindowContent::TaskManager(TaskManagerState),
+        }
+    }
+
+    fn default_size(self) -> (u32, u32) {
+        match self {
+            AppKind::Terminal => (460, 260),
+            AppKind::Settings => (300, 150),
+            AppKind::Files => (420, 260),
+            AppKind::Store => (420, 150),
+            AppKind::Notes => (360, 260),
+            AppKind::Calculator => (200, 260),
+            AppKind::TaskManager => (280, 220),
+        }
+    }
+}
 
 /// Non-character keyboard input the focused window (or the window manager
 /// itself, for Alt+Tab) cares about -- arrow keys for history/cursor
@@ -81,6 +161,8 @@ struct GuiState {
     /// Screen-space snap preview rect shown while dragging near an edge,
     /// applied on release.
     snap_preview: Option<(i32, i32, u32, u32)>,
+    /// The Moon-button app launcher popup, open or closed.
+    moon_menu: Option<ContextMenu>,
 }
 
 impl GuiState {
@@ -97,7 +179,44 @@ impl GuiState {
             stars: Vec::new(),
             context_menu: None,
             snap_preview: None,
+            moon_menu: None,
         }
+    }
+
+    /// Focuses the app of `kind` if a window for it is already open
+    /// (raising it to the top of z-order), or spawns a new one cascaded
+    /// down from the last-opened window so it doesn't land exactly on top
+    /// of an existing one.
+    fn open_app(&mut self, kind: AppKind, screen_w: usize, screen_h: usize) {
+        if let Some(idx) = self
+            .windows
+            .iter()
+            .position(|w| w.title == kind.dock_title())
+        {
+            let mut w = self.windows.remove(idx);
+            w.minimized = false;
+            self.windows.push(w);
+            return;
+        }
+
+        let (ax, ay, _, _) = content_area(screen_w, screen_h);
+        let cascade = (self.windows.len() as i32 % 6) * 24;
+        let (w, h) = kind.default_size();
+        let id = self.next_id;
+        self.next_id += 1;
+        self.windows.push(Window {
+            id,
+            x: ax + cascade,
+            y: ay + cascade,
+            w,
+            h,
+            title: String::from(kind.dock_title()),
+            content: kind.new_content(),
+            minimized: false,
+            maximized: None,
+            opened_at: crate::sched::ticks(),
+            closing_since: None,
+        });
     }
 }
 
@@ -309,6 +428,46 @@ pub fn on_mouse(dx: i32, dy: i32, left: bool, right: bool, _middle: bool) {
             }
         }
 
+        // Same capture-the-next-click pattern as the context menu, for the
+        // Moon-button app launcher.
+        if left && !gui.left_was_down {
+            if let Some(menu) = gui.moon_menu.take() {
+                let row = (cy - menu.y) / MENU_ROW_H;
+                if cx >= menu.x
+                    && cx < menu.x + MENU_W
+                    && row >= 0
+                    && (row as usize) < menu.items.len()
+                {
+                    let action = menu.items[row as usize].1 as usize;
+                    if let Some(kind) = AppKind::ALL.get(action).copied() {
+                        gui.open_app(kind, screen_w, screen_h);
+                    }
+                }
+                gui.left_was_down = left;
+                gui.right_was_down = right;
+                drop(gui);
+                redraw();
+                return;
+            }
+            if topbar::logo_contains(cx, cy) {
+                let items = AppKind::ALL
+                    .iter()
+                    .enumerate()
+                    .map(|(i, kind)| (String::from(kind.label()), i as u32))
+                    .collect();
+                gui.moon_menu = Some(ContextMenu {
+                    x: 4,
+                    y: topbar::HEIGHT as i32 + 2,
+                    items,
+                });
+                gui.left_was_down = left;
+                gui.right_was_down = right;
+                drop(gui);
+                redraw();
+                return;
+            }
+        }
+
         if right && !gui.right_was_down {
             if let Some(idx) = hit_test(&gui.windows, cx, cy) {
                 let w = &gui.windows[idx];
@@ -463,6 +622,9 @@ pub fn redraw() {
     notifications::render(screen_w as i32 - 16, topbar::HEIGHT as i32 + 12);
 
     if let Some((_, menu)) = &gui.context_menu {
+        render_context_menu(menu);
+    }
+    if let Some(menu) = &gui.moon_menu {
         render_context_menu(menu);
     }
 
