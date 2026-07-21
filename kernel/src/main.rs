@@ -22,6 +22,7 @@ mod memory;
 mod net;
 mod pe;
 mod pkg;
+mod power;
 mod process;
 mod sched;
 mod syscall;

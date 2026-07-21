@@ -1,16 +1,28 @@
-//! A tiny built-in terminal widget: a scrollback buffer, a single editable
-//! input line, and a handful of commands. Not a real shell running a real
-//! process (there's no usermode or ELF loader yet -- that's M7/M8) -- this
-//! is a kernel-hosted widget proving the window system can host interactive
-//! content and route keyboard input to it.
+//! A built-in terminal widget: a scrollback buffer, a single editable input
+//! line, and a real shell over the RAMFS (`ls`/`cd`/`pwd`/`mkdir`/`touch`/
+//! `rm`/`cp`/`mv`/`cat`/`echo`, with real `>` output redirection into RAMFS
+//! files). Not a real process running through the ELF loader -- these are
+//! kernel-hosted builtins, not `/bin/ls` -- but every operation is real:
+//! `cat`/`ls`/`cd` genuinely read the same `fs::root()` RAMFS the File
+//! Manager and package manager use, `rm`/`mkdir`/`cp`/`mv` genuinely mutate
+//! it. Tab-completion and arrow-key history are real too. Pipes are the one
+//! thing intentionally left out: simulating a shell pipeline between a
+//! handful of builtins (no external processes to actually connect) would be
+//! more theater than feature, so it's not attempted.
 
 use crate::framebuffer;
 use alloc::collections::VecDeque;
-use alloc::string::String;
+use alloc::format;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 const MAX_LINES: usize = 200;
 const LINE_HEIGHT: i32 = 10;
+
+const COMMANDS: &[&str] = &[
+    "help", "clear", "uptime", "mem", "echo", "pkg", "pwd", "cd", "ls", "mkdir", "touch", "rm",
+    "cp", "mv", "cat", "whoami", "date", "time", "history", "reboot", "shutdown",
+];
 
 pub struct TerminalState {
     lines: VecDeque<String>,
@@ -20,6 +32,32 @@ pub struct TerminalState {
     /// Index into `history` while browsing with `Up`/`Down`; `None` means
     /// the input line is fresh (not currently recalling a past command).
     history_pos: Option<usize>,
+    cwd: String,
+}
+
+/// Resolves `path` against `cwd`: absolute paths (leading `/`) pass through,
+/// anything else is joined on. Handles `.`/`..` segments so `cd ..` and
+/// `cat ../foo` work, but doesn't attempt symlinks -- RAMFS doesn't have any.
+fn resolve(cwd: &str, path: &str) -> String {
+    let mut segments: Vec<&str> = if path.starts_with('/') {
+        Vec::new()
+    } else {
+        cwd.split('/').filter(|s| !s.is_empty()).collect()
+    };
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                segments.pop();
+            }
+            seg => segments.push(seg),
+        }
+    }
+    if segments.is_empty() {
+        String::from("/")
+    } else {
+        format!("/{}", segments.join("/"))
+    }
 }
 
 impl TerminalState {
@@ -31,6 +69,7 @@ impl TerminalState {
             current: String::new(),
             history: Vec::new(),
             history_pos: None,
+            cwd: String::from("/"),
         }
     }
 
@@ -38,7 +77,7 @@ impl TerminalState {
         match ch {
             b'\n' => {
                 let line = core::mem::take(&mut self.current);
-                self.push_line(alloc::format!("> {}", line));
+                self.push_line(format!("{} > {}", self.cwd, line));
                 if !line.trim().is_empty() {
                     self.history.push(line.clone());
                 }
@@ -49,11 +88,53 @@ impl TerminalState {
                 self.current.pop();
                 self.history_pos = None;
             }
+            b'\t' => self.complete(),
             0x20..=0x7E => {
                 self.current.push(ch as char);
                 self.history_pos = None;
             }
             _ => {}
+        }
+    }
+
+    /// Completes the word under the cursor: the first word against
+    /// `COMMANDS`, any later word against entries in `cwd`. Only completes
+    /// when the match is unambiguous (a single candidate) -- listing every
+    /// candidate on multiple matches would need more UI than a single input
+    /// line has room for, so it's a no-op there rather than a half feature.
+    fn complete(&mut self) {
+        let is_first_word = !self.current.trim_start().contains(' ');
+        let word_start = self.current.rfind(' ').map_or(0, |i| i + 1);
+        let word = &self.current[word_start..];
+        if word.is_empty() {
+            return;
+        }
+
+        let candidates: Vec<String> = if is_first_word {
+            COMMANDS
+                .iter()
+                .filter(|c| c.starts_with(word))
+                .map(|c| c.to_string())
+                .collect()
+        } else {
+            let root = crate::fs::root().lock();
+            root.list_dir(&self.cwd)
+                .into_iter()
+                .map(|(path, is_dir)| {
+                    let name = path.rsplit('/').next().unwrap_or(&path).to_string();
+                    if is_dir {
+                        format!("{name}/")
+                    } else {
+                        name
+                    }
+                })
+                .filter(|name| name.starts_with(word))
+                .collect()
+        };
+
+        if candidates.len() == 1 {
+            self.current.truncate(word_start);
+            self.current.push_str(&candidates[0]);
         }
     }
 
@@ -97,51 +178,220 @@ impl TerminalState {
         }
     }
 
+    /// Splits a trailing `> path` (or `>> path`, treated the same as `>` --
+    /// RAMFS has no append primitive) off a command line. Returns the
+    /// command part and the redirect target, if any.
+    fn split_redirect(line: &str) -> (&str, Option<&str>) {
+        if let Some(idx) = line.find('>') {
+            let cmd = line[..idx].trim_end();
+            let rest = line[idx..].trim_start_matches('>').trim();
+            (cmd, if rest.is_empty() { None } else { Some(rest) })
+        } else {
+            (line, None)
+        }
+    }
+
     fn run_command(&mut self, line: &str) {
-        let line = line.trim();
+        let (cmd_part, redirect) = Self::split_redirect(line.trim());
+        let mut output = Vec::new();
+        self.dispatch(cmd_part, &mut output);
+
+        match redirect {
+            Some(target) => {
+                let path = resolve(&self.cwd, target);
+                let data = output.join("\n");
+                crate::fs::root().lock().write(&path, data.as_bytes());
+                self.push_line(format!("(redirected {} line(s) to {})", output.len(), path));
+            }
+            None => {
+                for line in output {
+                    self.push_line(line);
+                }
+            }
+        }
+    }
+
+    fn dispatch(&mut self, line: &str, out: &mut Vec<String>) {
         let mut parts = line.split_whitespace();
         match parts.next() {
-            Some("help") => {
-                self.push_line(String::from(
-                    "commands: help, clear, uptime, mem, echo <text>, pkg list, pkg run <name>",
-                ));
-            }
+            Some("help") => out.push(String::from(
+                "help clear uptime mem echo pkg pwd cd ls mkdir touch rm cp mv cat whoami date time history reboot shutdown",
+            )),
             Some("clear") => self.lines.clear(),
             Some("uptime") => {
                 let ticks = crate::sched::ticks();
-                self.push_line(alloc::format!(
-                    "up {} ticks (~{}s at 100Hz)",
-                    ticks,
-                    ticks / 100
-                ));
+                out.push(format!("up {} ticks (~{}s at 100Hz)", ticks, ticks / 100));
             }
             Some("mem") => {
                 let stats = crate::memory::pmm::stats();
-                self.push_line(alloc::format!(
+                out.push(format!(
                     "{} MiB free / {} MiB total",
                     (stats.free_frames * 4096) / (1024 * 1024),
                     (stats.total_frames * 4096) / (1024 * 1024)
                 ));
             }
-            Some("echo") => {
-                let rest: Vec<&str> = parts.collect();
-                self.push_line(rest.join(" "));
+            Some("echo") => out.push(parts.collect::<Vec<_>>().join(" ")),
+            Some("pkg") => self.run_pkg_command(parts.next(), parts.next(), out),
+            Some("pwd") => out.push(self.cwd.clone()),
+            Some("cd") => self.run_cd(parts.next(), out),
+            Some("ls") => self.run_ls(parts.next(), out),
+            Some("mkdir") => self.run_mkdir(parts.next(), out),
+            Some("touch") => self.run_touch(parts.next(), out),
+            Some("rm") => self.run_rm(parts.next(), out),
+            Some("cp") => self.run_cp(parts.next(), parts.next(), out),
+            Some("mv") => self.run_mv(parts.next(), parts.next(), out),
+            Some("cat") => self.run_cat(parts.next(), out),
+            Some("whoami") => out.push(String::from("moon")),
+            Some("date") => {
+                let dt = crate::drivers::rtc::read();
+                out.push(format!("{:04}-{:02}-{:02}", dt.year, dt.month, dt.day));
             }
-            Some("pkg") => self.run_pkg_command(parts.next(), parts.next()),
-            Some(other) => self.push_line(alloc::format!("unknown command: {}", other)),
+            Some("time") => {
+                let dt = crate::drivers::rtc::read();
+                out.push(format!("{:02}:{:02}:{:02}", dt.hour, dt.minute, dt.second));
+            }
+            Some("history") => {
+                for (i, cmd) in self.history.iter().enumerate() {
+                    out.push(format!("{:4}  {}", i + 1, cmd));
+                }
+            }
+            Some("reboot") => crate::power::reboot(),
+            Some("shutdown") => crate::power::shutdown(),
+            Some(other) => out.push(format!("unknown command: {other} (try 'help')")),
             None => {}
         }
     }
 
-    fn run_pkg_command(&mut self, sub: Option<&str>, arg: Option<&str>) {
+    fn run_cd(&mut self, arg: Option<&str>, out: &mut Vec<String>) {
+        let target = resolve(&self.cwd, arg.unwrap_or("/"));
+        let root = crate::fs::root().lock();
+        if root.is_dir(&target) {
+            drop(root);
+            self.cwd = target;
+        } else {
+            out.push(format!("cd: not a directory: {target}"));
+        }
+    }
+
+    fn run_ls(&mut self, arg: Option<&str>, out: &mut Vec<String>) {
+        let target = resolve(&self.cwd, arg.unwrap_or("."));
+        let root = crate::fs::root().lock();
+        if !root.is_dir(&target) {
+            out.push(format!("ls: not a directory: {target}"));
+            return;
+        }
+        let entries = root.list_dir(&target);
+        if entries.is_empty() {
+            out.push(String::from("(empty)"));
+        }
+        for (path, is_dir) in entries {
+            let name = path.rsplit('/').next().unwrap_or(&path);
+            out.push(if is_dir {
+                format!("{name}/")
+            } else {
+                name.to_string()
+            });
+        }
+    }
+
+    fn run_mkdir(&mut self, arg: Option<&str>, out: &mut Vec<String>) {
+        match arg {
+            Some(path) => {
+                let target = resolve(&self.cwd, path);
+                crate::fs::root().lock().mkdir(&target);
+                out.push(format!("created {target}"));
+            }
+            None => out.push(String::from("usage: mkdir <path>")),
+        }
+    }
+
+    fn run_touch(&mut self, arg: Option<&str>, out: &mut Vec<String>) {
+        match arg {
+            Some(path) => {
+                let target = resolve(&self.cwd, path);
+                let mut root = crate::fs::root().lock();
+                if !root.exists(&target) {
+                    root.write(&target, b"");
+                }
+                out.push(format!("touched {target}"));
+            }
+            None => out.push(String::from("usage: touch <path>")),
+        }
+    }
+
+    fn run_rm(&mut self, arg: Option<&str>, out: &mut Vec<String>) {
+        match arg {
+            Some(path) => {
+                let target = resolve(&self.cwd, path);
+                let mut root = crate::fs::root().lock();
+                if root.remove(&target) || root.rmdir(&target) {
+                    out.push(format!("removed {target}"));
+                } else {
+                    out.push(format!("rm: no such file: {target}"));
+                }
+            }
+            None => out.push(String::from("usage: rm <path>")),
+        }
+    }
+
+    fn run_cp(&mut self, src: Option<&str>, dst: Option<&str>, out: &mut Vec<String>) {
+        match (src, dst) {
+            (Some(src), Some(dst)) => {
+                let (src, dst) = (resolve(&self.cwd, src), resolve(&self.cwd, dst));
+                if crate::fs::root().lock().copy(&src, &dst) {
+                    out.push(format!("copied {src} -> {dst}"));
+                } else {
+                    out.push(format!("cp: failed ({src} missing, or {dst} exists?)"));
+                }
+            }
+            _ => out.push(String::from("usage: cp <src> <dst>")),
+        }
+    }
+
+    fn run_mv(&mut self, src: Option<&str>, dst: Option<&str>, out: &mut Vec<String>) {
+        match (src, dst) {
+            (Some(src), Some(dst)) => {
+                let (src, dst) = (resolve(&self.cwd, src), resolve(&self.cwd, dst));
+                if crate::fs::root().lock().rename(&src, &dst) {
+                    out.push(format!("moved {src} -> {dst}"));
+                } else {
+                    out.push(format!("mv: failed ({src} missing, or {dst} exists?)"));
+                }
+            }
+            _ => out.push(String::from("usage: mv <src> <dst>")),
+        }
+    }
+
+    fn run_cat(&mut self, arg: Option<&str>, out: &mut Vec<String>) {
+        match arg {
+            Some(path) => {
+                let target = resolve(&self.cwd, path);
+                let root = crate::fs::root().lock();
+                match root.read(&target) {
+                    Some(data) => match core::str::from_utf8(data) {
+                        Ok(text) => {
+                            for line in text.lines() {
+                                out.push(line.to_string());
+                            }
+                        }
+                        Err(_) => out.push(format!("cat: {target} is not valid UTF-8")),
+                    },
+                    None => out.push(format!("cat: no such file: {target}")),
+                }
+            }
+            None => out.push(String::from("usage: cat <path>")),
+        }
+    }
+
+    fn run_pkg_command(&mut self, sub: Option<&str>, arg: Option<&str>, out: &mut Vec<String>) {
         match sub {
             Some("list") => {
                 let packages = crate::pkg::installed();
                 if packages.is_empty() {
-                    self.push_line(String::from("no packages installed"));
+                    out.push(String::from("no packages installed"));
                 }
                 for p in packages {
-                    self.push_line(alloc::format!("{} {} ({})", p.name, p.version, p.file_name));
+                    out.push(format!("{} {} ({})", p.name, p.version, p.file_name));
                 }
             }
             Some("run") => match arg {
@@ -152,16 +402,16 @@ impl TerminalState {
                         .map(|p| p.file_name);
                     match target {
                         Some(file_name) => match crate::pkg::run(&file_name) {
-                            Ok(name) => self.push_line(alloc::format!("running {}", name)),
-                            Err(err) => self.push_line(alloc::format!("pkg run failed: {}", err)),
+                            Ok(name) => out.push(format!("running {name}")),
+                            Err(err) => out.push(format!("pkg run failed: {err}")),
                         },
-                        None => self.push_line(alloc::format!("no such package: {}", name)),
+                        None => out.push(format!("no such package: {name}")),
                     }
                 }
-                None => self.push_line(String::from("usage: pkg run <name>")),
+                None => out.push(String::from("usage: pkg run <name>")),
             },
-            Some(other) => self.push_line(alloc::format!("unknown pkg subcommand: {}", other)),
-            None => self.push_line(String::from("usage: pkg list | pkg run <name>")),
+            Some(other) => out.push(format!("unknown pkg subcommand: {other}")),
+            None => out.push(String::from("usage: pkg list | pkg run <name>")),
         }
     }
 
@@ -190,7 +440,7 @@ impl TerminalState {
                 );
             }
 
-            let prompt = alloc::format!("> {}_", self.current);
+            let prompt = format!("{} > {}_", self.cwd, self.current);
             let prompt = if prompt.len() > max_chars {
                 &prompt[prompt.len() - max_chars..]
             } else {
