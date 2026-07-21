@@ -2,6 +2,7 @@
 //! manipulation, and the kernel heap.
 
 pub mod heap;
+pub mod mmio;
 pub mod paging;
 pub mod pmm;
 

@@ -11,10 +11,12 @@ mod arch;
 mod drivers;
 mod font;
 mod framebuffer;
+mod fs;
 mod limine;
 mod memory;
 mod sched;
 
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::panic::PanicInfo;
 use core::sync::atomic::{AtomicU64, Ordering};
@@ -113,6 +115,51 @@ extern "C" fn kmain() -> ! {
         None => crate::serial_println!("no framebuffer available"),
     }
 
+    {
+        let mut root = fs::root().lock();
+        root.write("/hello.txt", b"Hello from moon OS RAMFS!\n");
+        let contents = root.read("/hello.txt").unwrap();
+        crate::serial_println!(
+            "ramfs: /hello.txt = {:?}",
+            core::str::from_utf8(contents).unwrap_or("<binary>")
+        );
+        let files: Vec<&str> = root.list().collect();
+        crate::serial_println!("ramfs: files = {:?}", files);
+    }
+
+    let ahci_ports = drivers::ahci::init();
+    for port in &ahci_ports {
+        match port.kind {
+            drivers::ahci::PortKind::Sata => {
+                let mut buf = [0u8; 512];
+                if drivers::ahci::identify(port, &mut buf) {
+                    crate::serial_println!(
+                        "ahci: port {} SATA drive model=\"{}\"",
+                        port.index,
+                        ata_model_string(&buf)
+                    );
+                }
+            }
+            drivers::ahci::PortKind::Atapi => {
+                let mut sector = [0u8; 2048];
+                if drivers::ahci::atapi_read_sector(port, 16, &mut sector) {
+                    let signature_ok = &sector[1..6] == b"CD001";
+                    crate::serial_println!(
+                        "ahci: port {} ATAPI read of LBA16 succeeded, ISO9660 PVD signature: {}",
+                        port.index,
+                        if signature_ok {
+                            "CD001 (verified!)"
+                        } else {
+                            "mismatch"
+                        }
+                    );
+                } else {
+                    crate::serial_println!("ahci: port {} ATAPI read failed", port.index);
+                }
+            }
+        }
+    }
+
     sched::spawn(task_a);
     sched::spawn(task_b);
     crate::serial_println!("scheduler: {} task(s) spawned", sched::task_count());
@@ -155,6 +202,17 @@ extern "C" fn task_b() -> ! {
             crate::serial_println!("[task B] iteration {}", n);
         }
     }
+}
+
+/// ATA IDENTIFY's model string (words 27-46) is ASCII but byte-swapped
+/// within each 16-bit word, and space-padded to 40 bytes.
+fn ata_model_string(identify: &[u8; 512]) -> String {
+    let mut s = String::with_capacity(40);
+    for pair in identify[54..94].chunks_exact(2) {
+        s.push(pair[1] as char);
+        s.push(pair[0] as char);
+    }
+    s.trim().to_string()
 }
 
 fn fatal(message: &str) -> ! {

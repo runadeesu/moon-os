@@ -5,7 +5,7 @@ Windows・macOS・Linux・Android のいいところを参考にした、完全�
 
 現在のマイルストーンや今後の計画は [ROADMAP.md](ROADMAP.md) を参照してください。
 
-## 現状 (M0/M1/M2/M3 完了)
+## 現状 (M0/M1/M2/M3/M4 完了)
 
 - 独自64bitカーネル (Rust, `no_std` / stable toolchain, ナイトリー不要)
 - ブートローダーは [Limine](https://github.com/limine-bootloader/limine) を採用
@@ -22,7 +22,11 @@ Windows・macOS・Linux・Android のいいところを参考にした、完全�
   (`kernel/src/sched.rs`) — 専用コンテキストスイッチコードなしで `iretq` の仕組みを流用
 - PS/2 キーボード / マウスドライバ (`kernel/src/drivers/`) — IRQ1/IRQ12経由でスキャンコード・
   マウスパケットを受信し、シリアル/フレームバッファへエコー
-- QEMU (BIOS/UEFI 両方) での起動・ヒープ動作・マルチタスク・キーボード/マウス入力を実機確認済み
+- PCIバス列挙 + AHCI (SATA) ドライバ — HBA/ポート初期化、ATA IDENTIFY、ATAPI PACKET経由の
+  セクタ読み込みに対応。起動用ISOイメージから実際にセクタを読み、ISO9660の"CD001"署名を確認済み
+- 簡易VFS + RAMFS (`kernel/src/fs/`) — ファイルの書き込み/読み込み/一覧を実装
+- QEMU (BIOS/UEFI 両方) での起動・ヒープ動作・マルチタスク・キーボード/マウス入力・
+  ディスクI/Oを実機確認済み
 
 ## リポジトリ構成
 
@@ -54,12 +58,18 @@ moon-os/
 │       │   ├── mod.rs            # HHDMオフセット管理・phys_to_virt
 │       │   ├── pmm.rs             # 物理メモリアロケータ (ビットマップ)
 │       │   ├── paging.rs          # ページテーブル操作 (map/unmap/translate)
-│       │   └── heap.rs            # カーネルヒープ (#[global_allocator])
+│       │   ├── heap.rs            # カーネルヒープ (#[global_allocator])
+│       │   └── mmio.rs             # デバイスMMIO領域のマッピング (PCI BAR用)
 │       ├── drivers/
 │       │   ├── mod.rs
 │       │   ├── ps2.rs             # i8042 PS/2コントローラ アクセス
 │       │   ├── keyboard.rs         # PS/2キーボード (スキャンコード→ASCII)
-│       │   └── mouse.rs            # PS/2マウス (3バイトパケット)
+│       │   ├── mouse.rs            # PS/2マウス (3バイトパケット)
+│       │   ├── pci.rs              # PCIバス列挙 (0xCF8/0xCFC)
+│       │   └── ahci.rs             # AHCI (SATA) ドライバ
+│       ├── fs/
+│       │   ├── mod.rs             # VFS (現状はRAMFS一枚のマウント)
+│       │   └── ramfs.rs            # インメモリファイルシステム
 │       └── sched.rs               # プリエンプティブ・ラウンドロビンスケジューラ
 └── tools/
     ├── build.sh              # カーネルビルド + ISO作成 (Limineは初回実行時に自動取得)
@@ -114,6 +124,11 @@ pmm: 255 MiB total, 254 MiB free (65382 4K frames)
 heap: mapped and handed to the global allocator
 heap self-test: Vec<u32> of 16 squares, sum=1240
 framebuffer: 1280x800 @ 32 bpp
+ramfs: /hello.txt = "Hello from moon OS RAMFS!\n"
+ramfs: files = ["/hello.txt"]
+ahci: found controller 8086:2922 at 00:1f.2 (ABAR=0xfebd5000)
+ahci: port 2 live, device = Atapi
+ahci: port 2 ATAPI read of LBA16 succeeded, ISO9660 PVD signature: CD001 (verified!)
 scheduler: 2 task(s) spawned
 keyboard: IRQ1 unmasked
 mouse: enabled, IRQ12 unmasked
@@ -131,10 +146,10 @@ interrupts enabled, 100 Hz timer running, entering idle loop
 qemu-system-x86_64 -M q35 -m 256M -cdrom build/moon-os.iso -serial stdio -display none -no-reboot -no-shutdown
 ```
 
-## 次の開発ステップ (M4: ファイルシステム)
+## 次の開発ステップ (M5: GUI / ウィンドウシステム)
 
-- VFS (仮想ファイルシステム層)
-- RAMFS / initrd
-- AHCI (SATA) ドライバ
+- コンポジタ / ウィンドウマネージャー
+- 描画プリミティブ (矩形、フォント、画像)
+- イベントループ (マウス/キーボード入力の配送)
 
 詳細は [ROADMAP.md](ROADMAP.md) を参照してください。
