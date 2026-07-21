@@ -12,7 +12,7 @@
 //! change than this pass makes.
 
 use super::widgets::{
-    calculator::CalculatorState, files::FileManagerState, notes::NotesState,
+    calculator::CalculatorState, files::FileManagerState, moon_ai::MoonAiState, notes::NotesState,
     settings::SettingsState, store::StoreState, taskmanager::TaskManagerState,
     terminal::TerminalState,
 };
@@ -38,6 +38,7 @@ pub enum WindowContent {
     Notes(NotesState),
     Calculator(CalculatorState),
     TaskManager(TaskManagerState),
+    MoonAi(MoonAiState),
 }
 
 impl WindowContent {
@@ -176,6 +177,7 @@ impl Window {
             WindowContent::Files(files) => files.handle_char(ch),
             WindowContent::Store(store) => store.handle_char(ch),
             WindowContent::Notes(notes) => notes.handle_char(ch),
+            WindowContent::MoonAi(ai) => ai.handle_char(ch),
             WindowContent::Settings(_)
             | WindowContent::Calculator(_)
             | WindowContent::TaskManager(_) => {}
@@ -199,7 +201,8 @@ impl Window {
             WindowContent::Calculator(calc) => calc.handle_click(x, y),
             WindowContent::Terminal(_)
             | WindowContent::Notes(_)
-            | WindowContent::TaskManager(_) => {}
+            | WindowContent::TaskManager(_)
+            | WindowContent::MoonAi(_) => {}
         }
     }
 
@@ -225,6 +228,7 @@ impl Window {
             WindowContent::Notes(_) => b"Notes",
             WindowContent::Calculator(_) => b"Calculator",
             WindowContent::TaskManager(_) => b"Task Manager",
+            WindowContent::MoonAi(_) => b"Moon AI",
         }
     }
 
@@ -314,6 +318,7 @@ impl Window {
             WindowContent::Notes(notes) => notes.render(self.x, content_y, self.w, self.h),
             WindowContent::Calculator(calc) => calc.render(self.x, content_y, self.w, self.h),
             WindowContent::TaskManager(tm) => tm.render(self.x, content_y, self.w, self.h),
+            WindowContent::MoonAi(ai) => ai.render(self.x, content_y, self.w, self.h),
         }
 
         // Open/close flash: a whole-window overlay whose alpha ramps down

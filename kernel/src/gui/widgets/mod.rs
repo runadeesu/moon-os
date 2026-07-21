@@ -1,5 +1,6 @@
 pub mod calculator;
 pub mod files;
+pub mod moon_ai;
 pub mod notes;
 pub mod settings;
 pub mod store;

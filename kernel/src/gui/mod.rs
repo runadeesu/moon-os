@@ -34,7 +34,7 @@ use alloc::vec::Vec;
 use desktop::Star;
 use spin::Mutex;
 use widgets::{
-    calculator::CalculatorState, files::FileManagerState, notes::NotesState,
+    calculator::CalculatorState, files::FileManagerState, moon_ai::MoonAiState, notes::NotesState,
     settings::SettingsState, store::StoreState, taskmanager::TaskManagerState,
     terminal::TerminalState,
 };
@@ -53,10 +53,11 @@ enum AppKind {
     Notes,
     Calculator,
     TaskManager,
+    MoonAi,
 }
 
 impl AppKind {
-    const ALL: [AppKind; 7] = [
+    const ALL: [AppKind; 8] = [
         AppKind::Terminal,
         AppKind::Settings,
         AppKind::Files,
@@ -64,6 +65,7 @@ impl AppKind {
         AppKind::Notes,
         AppKind::Calculator,
         AppKind::TaskManager,
+        AppKind::MoonAi,
     ];
 
     fn label(self) -> &'static str {
@@ -75,6 +77,7 @@ impl AppKind {
             AppKind::Notes => "Notes",
             AppKind::Calculator => "Calculator",
             AppKind::TaskManager => "Task Manager",
+            AppKind::MoonAi => "Moon AI",
         }
     }
 
@@ -90,6 +93,7 @@ impl AppKind {
             AppKind::Notes => "Notes",
             AppKind::Calculator => "Calc",
             AppKind::TaskManager => "Jobs",
+            AppKind::MoonAi => "AI",
         }
     }
 
@@ -102,6 +106,7 @@ impl AppKind {
             AppKind::Notes => WindowContent::Notes(NotesState::new()),
             AppKind::Calculator => WindowContent::Calculator(CalculatorState::new()),
             AppKind::TaskManager => WindowContent::TaskManager(TaskManagerState),
+            AppKind::MoonAi => WindowContent::MoonAi(MoonAiState::new()),
         }
     }
 
@@ -114,7 +119,24 @@ impl AppKind {
             AppKind::Notes => (360, 260),
             AppKind::Calculator => (200, 260),
             AppKind::TaskManager => (280, 220),
+            AppKind::MoonAi => (380, 240),
         }
+    }
+
+    /// Maps the short keys `widgets::moon_ai`'s command parser uses
+    /// (`crate::gui::request_open("settings")` etc.) back to a kind.
+    fn from_key(key: &str) -> Option<AppKind> {
+        Some(match key {
+            "terminal" => AppKind::Terminal,
+            "settings" => AppKind::Settings,
+            "files" => AppKind::Files,
+            "store" => AppKind::Store,
+            "notes" => AppKind::Notes,
+            "calculator" => AppKind::Calculator,
+            "taskmanager" => AppKind::TaskManager,
+            "moonai" => AppKind::MoonAi,
+            _ => return None,
+        })
     }
 }
 
@@ -221,6 +243,19 @@ impl GuiState {
 }
 
 static GUI: Mutex<GuiState> = Mutex::new(GuiState::new());
+
+/// App-open requests queued by widgets that can't reach `GUI` directly
+/// (currently just the Moon AI assistant, via `request_open`) -- drained
+/// after every keystroke in `on_key`.
+static PENDING_OPEN: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
+
+/// Asks the window manager to open (or focus, if already open) the named
+/// app on the next keystroke drain. `key` is one of the short strings
+/// `AppKind::from_key` understands (`"settings"`, `"files"`, ...); an
+/// unrecognized key is silently dropped when drained.
+pub fn request_open(key: &'static str) {
+    PENDING_OPEN.lock().push(key);
+}
 
 fn screen_size() -> (usize, usize) {
     framebuffer::with(|c| (c.width(), c.height())).unwrap_or((800, 600))
@@ -341,7 +376,28 @@ pub fn on_key(ch: u8) {
             top.handle_char(ch);
         }
     }
+    drain_pending_opens();
     redraw();
+}
+
+/// Opens/focuses whatever `request_open` queued while handling that
+/// keystroke -- e.g. the Moon AI widget finishing a "open settings" command
+/// on Enter. A no-op on ticks where nothing queued anything.
+fn drain_pending_opens() {
+    let pending: Vec<&'static str> = {
+        let mut queue = PENDING_OPEN.lock();
+        if queue.is_empty() {
+            return;
+        }
+        queue.drain(..).collect()
+    };
+    let (screen_w, screen_h) = screen_size();
+    let mut gui = GUI.lock();
+    for key in pending {
+        if let Some(kind) = AppKind::from_key(key) {
+            gui.open_app(kind, screen_w, screen_h);
+        }
+    }
 }
 
 /// Called from the keyboard IRQ handler for non-character keys (arrows,
