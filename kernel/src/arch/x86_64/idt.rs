@@ -37,10 +37,18 @@ impl IdtEntry {
     };
 
     fn set(&mut self, handler: usize, ist: u8) {
+        self.set_with_dpl(handler, ist, 0);
+    }
+
+    /// Like `set`, but with an explicit gate DPL. The syscall vector needs
+    /// DPL=3 -- otherwise `int 0x80` from ring 3 takes a #GP instead of
+    /// entering the gate, since the CPU checks the *gate's* DPL against CPL
+    /// for a software `int`, unlike hardware interrupts which ignore it.
+    fn set_with_dpl(&mut self, handler: usize, ist: u8, dpl: u8) {
         self.offset_low = (handler & 0xFFFF) as u16;
         self.selector = KERNEL_CODE_SELECTOR;
         self.ist = ist;
-        self.type_attr = 0x8E; // present, ring 0, 64-bit interrupt gate
+        self.type_attr = 0x8E | (dpl << 5); // present, 64-bit interrupt gate
         self.offset_mid = ((handler >> 16) & 0xFFFF) as u16;
         self.offset_high = (handler >> 32) as u32;
         self.reserved = 0;
@@ -139,6 +147,10 @@ extern "C" fn interrupt_dispatch(frame: *mut TrapFrame) -> *mut TrapFrame {
     if vector < 32 {
         handle_exception(frame);
         return frame;
+    }
+
+    if vector == SYSCALL_VECTOR as u64 {
+        return crate::syscall::handle(frame);
     }
 
     let irq = (vector - u64::from(pic::IRQ_BASE)) as u8;
@@ -316,6 +328,13 @@ interrupt_stub!(stub_45, 45, false);
 interrupt_stub!(stub_46, 46, false);
 interrupt_stub!(stub_47, 47, false);
 
+/// `int 0x80`: the syscall gate. A software interrupt rather than
+/// `SYSCALL`/`SYSRET` -- simpler to wire into the same common-stub/TrapFrame
+/// machinery everything else already uses, at the cost of the couple-dozen
+/// extra cycles a full interrupt gate costs over the dedicated instruction.
+pub const SYSCALL_VECTOR: usize = 0x80;
+interrupt_stub!(stub_syscall, 0x80, false);
+
 const DOUBLE_FAULT_VECTOR: usize = 8;
 
 pub fn init() {
@@ -336,6 +355,8 @@ pub fn init() {
             };
             IDT[vector].set(*stub as usize, ist);
         }
+
+        IDT[SYSCALL_VECTOR].set_with_dpl(stub_syscall as *const () as usize, 0, 3);
 
         let pointer = DescriptorTablePointer {
             limit: (size_of::<[IdtEntry; 256]>() - 1) as u16,

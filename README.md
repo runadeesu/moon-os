@@ -5,7 +5,7 @@ Windows・macOS・Linux・Android のいいところを参考にした、完全�
 
 現在のマイルストーンや今後の計画は [ROADMAP.md](ROADMAP.md) を参照してください。
 
-## 現状 (M0〜M6 基本部分 完了)
+## 現状 (M0〜M7 基本部分 完了)
 
 - 独自64bitカーネル (Rust, `no_std` / stable toolchain, ナイトリー不要)
 - ブートローダーは [Limine](https://github.com/limine-bootloader/limine) を採用
@@ -49,9 +49,17 @@ Windows・macOS・Linux・Android のいいところを参考にした、完全�
   ICMP/UDPを実装。DHCPクライアントでQEMU SLIRPから実際にIPアドレスを取得し、
   ゲートウェイへのICMP ping・DNS問い合わせ(example.comの実際の名前解決)まで成功
   (TCPは大規模なため今回は未実装。ROADMAP.md参照)
+- ユーザーモード基盤 (リング3実行・システムコール・ELFローダー) — GDTにユーザー
+  コード/データセグメント(RPL=3)とTSS.RSP0、DPL=3の`int 0x80`システムコール
+  ゲート(`kernel/src/syscall.rs`、独自ABI: rax=番号/rdi・rsi=引数)、プロセスごとの
+  独立アドレス空間(`memory::paging::AddressSpace` — 新規PML4、上位半分はカーネル/
+  HHDMと共有)、ELF64ローダー(`kernel/src/elf.rs`、静的リンクのET_EXECのみ対応)、
+  スケジューラのCR3切り替え(`sched::spawn_user`/`sched::exit_current`)を実装。
+  カーネルとは独立したスタンドアロンcrate `userland/init/` がリング3で実際に
+  `int 0x80`経由の文字列出力→正常終了までQEMU実機で確認済み(詳細はROADMAP.md参照)
 - QEMU (BIOS/UEFI 両方) での起動・ヒープ動作・マルチタスク・キーボード/マウス入力・
   ディスクI/O・ウィンドウのドラッグ操作/フォーカス切り替え/ターミナル操作・
-  DHCP/ping/DNSによる実ネットワーク往復を実機確認済み
+  DHCP/ping/DNSによる実ネットワーク往復・リング3ユーザープロセスの実行を実機確認済み
 
 ## リポジトリ構成
 
@@ -117,9 +125,19 @@ moon-os/
 │       │   ├── udp.rs              # UDP送受信 + ポート別受信箱
 │       │   ├── dhcp.rs             # DHCPクライアント
 │       │   └── dns.rs              # 簡易DNSリゾルバ (Aレコードのみ)
-│       └── sched.rs               # プリエンプティブ・ラウンドロビンスケジューラ
+│       ├── sched.rs               # プリエンプティブ・ラウンドロビンスケジューラ (CR3切替込み)
+│       ├── syscall.rs             # int 0x80 システムコールハンドラ
+│       └── elf.rs                 # ELF64ローダー (静的ET_EXECのみ)
+├── userland/
+│   └── init/                # 最小ユーザーランドテストプログラム (カーネルとは独立したcrate)
+│       ├── Cargo.toml         # 独立ワークスペース ([workspace] 空定義でルートから分離)
+│       ├── .cargo/config.toml  # target=x86_64-unknown-none (kernelの code-model=kernel は継承しない)
+│       ├── build.rs            # リンカスクリプトの指定
+│       ├── linker.ld            # ロードアドレス0x400000固定のリンカスクリプト
+│       └── src/main.rs          # int 0x80 でSYS_WRITE→SYS_EXITを呼ぶだけの最小プログラム
 └── tools/
-    ├── build.sh              # カーネルビルド + ISO作成 (Limineは初回実行時に自動取得)
+    ├── build.sh              # userland/init → カーネルの順にビルドし、ISO作成
+                                 # (Limineは初回実行時に自動取得)
     └── run.sh                # ISOをQEMUで起動
 ```
 
@@ -188,9 +206,12 @@ net: configured ip=10.0.2.15 mask=255.255.255.0 gateway=10.0.2.2 dns=10.0.2.3
 icmp: echo reply from 10.0.2.2 seq=1
 net: ping to gateway 10.0.2.2 succeeded
 net: DNS example.com -> 104.20.23.154
-scheduler: 2 task(s) spawned
+elf: init process loaded, entry=0x400000, user stack top=0x70000000
+scheduler: 3 task(s) spawned
 keyboard: IRQ1 unmasked
 mouse: enabled, IRQ12 unmasked
+[user] Hello from moon OS userland (ring 3)!
+syscall: user task exited with code 0
 interrupts enabled, 100 Hz timer running, entering idle loop
 [task A] iteration 100000000
 [task B] iteration 100000000
@@ -208,10 +229,13 @@ qemu-system-x86_64 -M q35 -m 256M -cdrom build/moon-os.iso \
     -serial stdio -display none -no-reboot -no-shutdown
 ```
 
-## 次の開発ステップ (M7: パッケージ管理 / アプリ基盤)
+## 次の開発ステップ (M7残り: パッケージ管理 / アプリ基盤)
 
-- moon OS ネイティブアプリの実行形式定義
-- ユーザーモード + ELFローダー
-- パッケージマネージャー
+M7のユーザーモード基盤 (リング3実行・`int 0x80`システムコール・ELF64ローダー・
+プロセスごとのアドレス空間) は完了しました。残っているのは:
+
+- moon OS ネイティブアプリの実行形式定義 (署名・依存関係メタデータ等)
+- ダブルクリックでのアプリ起動 (ファイルマネージャー連携)
+- パッケージマネージャー / Moon Store
 
 詳細は [ROADMAP.md](ROADMAP.md) を参照してください。

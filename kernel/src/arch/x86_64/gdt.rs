@@ -1,16 +1,22 @@
 //! Global Descriptor Table and Task State Segment setup.
 //!
-//! The TSS currently exists only to give the double-fault handler a private
-//! Interrupt Stack Table (IST) entry, so a stack overflow doesn't triple
+//! The TSS serves two jobs now: giving the double-fault handler a private
+//! Interrupt Stack Table (IST) entry (so a stack overflow doesn't triple
 //! fault while the CPU tries to push the exception frame onto an already
-//! blown stack.
+//! blown stack), and holding RSP0 -- the kernel stack the CPU switches to
+//! automatically whenever a trap interrupts a ring-3 task, needed now that
+//! there's a usermode (see `sched::spawn_user`).
 
 use core::arch::asm;
 use core::mem::size_of;
 
 pub const KERNEL_CODE_SELECTOR: u16 = 1 << 3;
 pub const KERNEL_DATA_SELECTOR: u16 = 2 << 3;
-const TSS_SELECTOR: u16 = 3 << 3;
+/// RPL=3 baked in: these are meant to be loaded directly into a ring-3
+/// task's saved `cs`/`ss`, not just the raw descriptor index.
+pub const USER_CODE_SELECTOR: u16 = (3 << 3) | 3;
+pub const USER_DATA_SELECTOR: u16 = (4 << 3) | 3;
+const TSS_SELECTOR: u16 = 5 << 3;
 
 const DOUBLE_FAULT_IST_INDEX: usize = 0;
 const IST_STACK_SIZE: usize = 4096 * 5;
@@ -49,10 +55,12 @@ struct DescriptorTablePointer {
     base: u64,
 }
 
-static mut GDT: [u64; 5] = [
+static mut GDT: [u64; 7] = [
     0x0000000000000000, // null
     0x00AF9A000000FFFF, // kernel code (64-bit, present, ring 0, exec/read)
     0x00CF92000000FFFF, // kernel data (present, ring 0, read/write)
+    0x00AFFA000000FFFF, // user code (64-bit, present, ring 3, exec/read)
+    0x00CFF2000000FFFF, // user data (present, ring 3, read/write)
     0,                  // TSS low half (filled in at init)
     0,                  // TSS high half (filled in at init)
 ];
@@ -75,11 +83,11 @@ pub fn init() {
         let tss_base = core::ptr::addr_of!(TSS) as u64;
         let tss_limit = (size_of::<Tss>() - 1) as u32;
         let (low, high) = tss_descriptor(tss_base, tss_limit);
-        GDT[3] = low;
-        GDT[4] = high;
+        GDT[5] = low;
+        GDT[6] = high;
 
         let pointer = DescriptorTablePointer {
-            limit: (size_of::<[u64; 5]>() - 1) as u16,
+            limit: (size_of::<[u64; 7]>() - 1) as u16,
             base: core::ptr::addr_of!(GDT) as u64,
         };
         asm!("lgdt [{}]", in(reg) &pointer, options(readonly, nostack, preserves_flags));
@@ -92,6 +100,17 @@ pub fn init() {
 
 pub fn double_fault_ist_index() -> u16 {
     DOUBLE_FAULT_IST_INDEX as u16
+}
+
+/// Sets TSS.RSP0: the stack the CPU switches to automatically when a trap
+/// interrupts a ring-3 task. The scheduler calls this on every context
+/// switch, pointing it at whichever task is about to run's private kernel
+/// stack -- irrelevant for kernel-mode tasks (they never take a privilege
+/// change on trap) but load-bearing for user ones.
+pub fn set_kernel_stack(rsp0: u64) {
+    unsafe {
+        TSS.rsp[0] = rsp0;
+    }
 }
 
 unsafe fn reload_segments() {

@@ -1,17 +1,24 @@
-//! A minimal preemptive round-robin scheduler for kernel-mode tasks.
+//! A minimal preemptive round-robin scheduler for kernel- and user-mode
+//! tasks.
 //!
-//! There's no address-space switch here (every task shares the kernel's page
-//! tables) and no `yield` -- the timer IRQ is the only thing that ever
-//! switches tasks. The trick that makes this simple: a suspended task's
-//! entire CPU state is just a [`TrapFrame`] sitting on top of its own kernel
-//! stack, identical in shape to what [`super::arch::x86_64::idt`]'s common
-//! interrupt stub builds for a real interrupt. Switching tasks is nothing
-//! more than telling that stub to `iretq` from a different stack than the
-//! one it was called on -- indistinguishable, from the CPU's perspective,
-//! from returning from an ordinary interrupt.
+//! The trick that makes this simple: a suspended task's entire CPU state is
+//! just a [`TrapFrame`] sitting on top of its own kernel stack, identical in
+//! shape to what [`super::arch::x86_64::idt`]'s common interrupt stub builds
+//! for a real interrupt. Switching tasks is nothing more than telling that
+//! stub to `iretq` from a different stack than the one it was called on --
+//! indistinguishable, from the CPU's perspective, from returning from an
+//! ordinary interrupt.
+//!
+//! Usermode tasks (see [`spawn_user`]) add two wrinkles kernel tasks don't
+//! have: their own [`AddressSpace`](crate::memory::paging::AddressSpace),
+//! switched to in CR3 on every context switch, and a *private* kernel
+//! stack the CPU switches to automatically via TSS.RSP0 whenever a trap
+//! interrupts them in ring 3 (kernel tasks never take a privilege change on
+//! trap, so RSP0 is simply irrelevant while one of those is running).
 
-use crate::arch::x86_64::gdt::{KERNEL_CODE_SELECTOR, KERNEL_DATA_SELECTOR};
+use crate::arch::x86_64::gdt::{self, KERNEL_CODE_SELECTOR, KERNEL_DATA_SELECTOR};
 use crate::arch::x86_64::idt::TrapFrame;
+use crate::memory::paging::{self, AddressSpace};
 use alloc::collections::VecDeque;
 use alloc::vec::Vec;
 use core::mem::size_of;
@@ -29,12 +36,21 @@ pub fn ticks() -> u64 {
 
 struct Task {
     id: u64,
-    /// Keeps the stack allocation alive. Empty for the wrapped idle task,
-    /// whose stack is whatever the kernel booted on.
+    /// Keeps the kernel-side stack allocation alive. Empty for the wrapped
+    /// idle task, whose stack is whatever the kernel booted on.
     _stack: Vec<u8>,
     /// Address of this task's saved [`TrapFrame`], i.e. where it should
     /// resume from. Updated every time it's preempted.
     sp: u64,
+    /// Top of this task's private kernel stack -- becomes TSS.RSP0 while
+    /// it's running. Unused (and unconsulted) for kernel-mode tasks.
+    kernel_stack_top: u64,
+    /// Physical address of this task's PML4.
+    cr3: u64,
+    /// Keeps the process's page tables (and the frames they map) alive for
+    /// as long as the task exists. `None` for kernel tasks, which share the
+    /// boot address space instead of owning one.
+    _address_space: Option<AddressSpace>,
 }
 
 struct Scheduler {
@@ -54,6 +70,7 @@ impl Scheduler {
 }
 
 static SCHED: Mutex<Scheduler> = Mutex::new(Scheduler::new());
+static CURRENT_CR3: AtomicU64 = AtomicU64::new(0);
 
 /// Spawns a new kernel task with its own stack. `entry` must never return.
 pub fn spawn(entry: extern "C" fn() -> !) {
@@ -82,6 +99,44 @@ pub fn spawn(entry: extern "C" fn() -> !) {
         id,
         _stack: stack,
         sp: frame_addr,
+        kernel_stack_top: stack_top,
+        cr3: paging::current_cr3(),
+        _address_space: None,
+    });
+}
+
+/// Spawns a new ring-3 task: `entry_va` and `user_stack_top` are virtual
+/// addresses already mapped (executable, and writable+present respectively)
+/// in `address_space`, typically by [`crate::elf::load`]. Ownership of
+/// `address_space` moves to the scheduler, which keeps it alive for as long
+/// as the task exists.
+pub fn spawn_user(entry_va: u64, user_stack_top: u64, address_space: AddressSpace) {
+    let mut kernel_stack = alloc::vec![0u8; STACK_SIZE];
+    let kernel_stack_top = kernel_stack.as_mut_ptr() as u64 + STACK_SIZE as u64;
+    let frame_addr = (kernel_stack_top - size_of::<TrapFrame>() as u64) & !0xF;
+
+    // SAFETY: frame_addr points inside the kernel stack we just allocated
+    // and sized for exactly one TrapFrame plus alignment slack.
+    unsafe {
+        let frame = frame_addr as *mut TrapFrame;
+        core::ptr::write_bytes(frame as *mut u8, 0, size_of::<TrapFrame>());
+        (*frame).rip = entry_va;
+        (*frame).cs = u64::from(gdt::USER_CODE_SELECTOR);
+        (*frame).rflags = 0x202;
+        (*frame).rsp = user_stack_top;
+        (*frame).ss = u64::from(gdt::USER_DATA_SELECTOR);
+    }
+
+    let mut sched = SCHED.lock();
+    let id = sched.next_id;
+    sched.next_id += 1;
+    sched.tasks.push_back(Task {
+        id,
+        _stack: kernel_stack,
+        sp: frame_addr,
+        kernel_stack_top,
+        cr3: address_space.cr3(),
+        _address_space: Some(address_space),
     });
 }
 
@@ -109,6 +164,9 @@ pub fn on_timer_tick(current_frame: *mut TrapFrame) -> *mut TrapFrame {
             id: 0,
             _stack: Vec::new(),
             sp: current_frame as u64,
+            kernel_stack_top: 0,
+            cr3: paging::current_cr3(),
+            _address_space: None,
         });
         sched.idle_wrapped = true;
     } else if let Some(running) = sched.tasks.front_mut() {
@@ -119,9 +177,45 @@ pub fn on_timer_tick(current_frame: *mut TrapFrame) -> *mut TrapFrame {
         sched.tasks.push_back(running);
     }
 
-    sched
-        .tasks
-        .front()
-        .map(|t| t.sp as *mut TrapFrame)
-        .unwrap_or(current_frame)
+    let Some(next) = sched.tasks.front() else {
+        return current_frame;
+    };
+
+    if CURRENT_CR3.swap(next.cr3, Ordering::Relaxed) != next.cr3 {
+        paging::switch_to(next.cr3);
+    }
+    gdt::set_kernel_stack(next.kernel_stack_top);
+
+    next.sp as *mut TrapFrame
+}
+
+/// Called from a `SYS_EXIT` syscall: drops the current (front-of-queue)
+/// task -- freeing its kernel stack and address space -- and returns the
+/// frame of whichever task should run next. Never returns to the caller in
+/// the normal sense: the common stub `iretq`s straight into that frame.
+pub fn exit_current() -> *mut TrapFrame {
+    let mut sched = SCHED.lock();
+
+    // The idle task (id 0) represents kmain's own halt loop, not a real
+    // process -- there's nothing meaningful to "exit" it into, so treat the
+    // call as a no-op rather than dropping the only thing left to run.
+    if sched.tasks.front().map(|t| t.id) == Some(0) {
+        return sched.tasks.front().map(|t| t.sp as *mut TrapFrame).unwrap();
+    }
+
+    sched.tasks.pop_front();
+
+    let Some(next) = sched.tasks.front() else {
+        // Nothing left at all (shouldn't happen -- idle is never removed);
+        // fall back to whatever's still mapped rather than dereference a
+        // dangling frame.
+        return core::ptr::null_mut();
+    };
+
+    if CURRENT_CR3.swap(next.cr3, Ordering::Relaxed) != next.cr3 {
+        paging::switch_to(next.cr3);
+    }
+    gdt::set_kernel_stack(next.kernel_stack_top);
+
+    next.sp as *mut TrapFrame
 }

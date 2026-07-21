@@ -9,6 +9,10 @@ BUILD_DIR="$ROOT_DIR/build"
 LIMINE_DIR="$ROOT_DIR/third_party/limine"
 PROFILE="${PROFILE:-release}"
 
+echo "==> Building userland/init (release)"
+(cd "$ROOT_DIR/userland/init" && cargo build --release)
+export USERLAND_INIT_ELF="$ROOT_DIR/userland/init/target/x86_64-unknown-none/release/init"
+
 echo "==> Building kernel ($PROFILE)"
 (cd "$ROOT_DIR" && cargo build -p moon_kernel --profile "$([ "$PROFILE" = release ] && echo release || echo dev)")
 

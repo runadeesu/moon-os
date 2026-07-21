@@ -9,6 +9,7 @@ extern crate alloc;
 
 mod arch;
 mod drivers;
+mod elf;
 mod font;
 mod font_hiragana;
 mod framebuffer;
@@ -19,6 +20,7 @@ mod limine;
 mod memory;
 mod net;
 mod sched;
+mod syscall;
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -167,6 +169,7 @@ extern "C" fn kmain() -> ! {
 
     sched::spawn(task_a);
     sched::spawn(task_b);
+    spawn_init_process();
     crate::serial_println!("scheduler: {} task(s) spawned", sched::task_count());
 
     arch::x86_64::pit::init(100);
@@ -186,6 +189,50 @@ extern "C" fn kmain() -> ! {
     crate::serial_println!("interrupts enabled, 100 Hz timer running, entering idle loop");
 
     halt();
+}
+
+/// The userland test binary (`userland/init`, a separate standalone crate --
+/// see its build.rs and kernel/build.rs for how the path gets here),
+/// embedded directly into the kernel image. There's no filesystem-backed
+/// process loading yet (that waits on a real on-disk package format, M7's
+/// longer-term goal); this is the "does ring 3 + syscalls + the ELF loader
+/// actually work end to end" proof.
+static INIT_ELF: &[u8] = include_bytes!(env!("USERLAND_INIT_ELF"));
+
+const USER_STACK_TOP: u64 = 0x0000_0000_7000_0000;
+const USER_STACK_PAGES: u64 = 4;
+
+/// Loads `INIT_ELF` into a fresh address space and hands it to the
+/// scheduler as a ring-3 task.
+fn spawn_init_process() {
+    let space = memory::paging::AddressSpace::new();
+
+    let loaded = match elf::load(&space, INIT_ELF) {
+        Ok(loaded) => loaded,
+        Err(err) => {
+            crate::serial_println!("elf: failed to load init process: {}", err);
+            return;
+        }
+    };
+
+    let stack_base = USER_STACK_TOP - USER_STACK_PAGES * 4096;
+    for i in 0..USER_STACK_PAGES {
+        let frame = memory::pmm::alloc_frame().expect("out of memory for the init user stack");
+        space.map(
+            stack_base + i * 4096,
+            frame,
+            memory::paging::FLAG_PRESENT
+                | memory::paging::FLAG_WRITABLE
+                | memory::paging::FLAG_USER,
+        );
+    }
+
+    crate::serial_println!(
+        "elf: init process loaded, entry={:#x}, user stack top={:#x}",
+        loaded.entry,
+        USER_STACK_TOP
+    );
+    sched::spawn_user(loaded.entry, USER_STACK_TOP, space);
 }
 
 static TASK_A_ITERS: AtomicU64 = AtomicU64::new(0);
