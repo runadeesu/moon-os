@@ -57,6 +57,14 @@ Windows・macOS・Linux・Android のいいところを参考にした、完全�
   スケジューラのCR3切り替え(`sched::spawn_user`/`sched::exit_current`)を実装。
   カーネルとは独立したスタンドアロンcrate `userland/init/` がリング3で実際に
   `int 0x80`経由の文字列出力→正常終了までQEMU実機で確認済み(詳細はROADMAP.md参照)
+- moon OS ネイティブパッケージ形式 (`.mapp`、`kernel/src/pkg.rs`) — 名前/バージョン+
+  ELF64本体を持つ単純なコンテナ。`kernel/src/process.rs`がELFロード+アドレス空間
+  作成+スケジューラ登録を1関数にまとめ、パッケージマネージャー・ファイルマネージャー・
+  Moon Storeが同じ経路でプロセスを起動。ターミナルの`pkg list`/`pkg run <name>`、
+  ファイルマネージャー(`gui/widgets/files.rs`、RAMFSブラウザ+ダブルクリック起動)、
+  Moon Store(`gui/widgets/store.rs`、ローカルカタログ+ワンクリック起動)から
+  実際に2つ目のユーザーランドテストアプリ(`userland/counter`)を起動できることを
+  QEMU実機で確認済み
 - QEMU (BIOS/UEFI 両方) での起動・ヒープ動作・マルチタスク・キーボード/マウス入力・
   ディスクI/O・ウィンドウのドラッグ操作/フォーカス切り替え/ターミナル操作・
   DHCP/ping/DNSによる実ネットワーク往復・リング3ユーザープロセスの実行を実機確認済み
@@ -115,8 +123,10 @@ moon-os/
 │       │   ├── topbar.rs           # 上部ステータスバー (ロゴ/時計/ネット状態)
 │       │   ├── dock.rs             # 左サイドドック (旧タスクバー)
 │       │   └── widgets/
-│       │       ├── terminal.rs      # ターミナルウィジェット (組み込みコマンド)
-│       │       └── settings.rs      # 設定ウィジェット (ライブシステム情報)
+│       │       ├── terminal.rs      # ターミナルウィジェット (pkg list/run 追加済み)
+│       │       ├── settings.rs      # 設定ウィジェット (ライブシステム情報 + 言語切替)
+│       │       ├── files.rs          # ファイルマネージャー (RAMFS一覧・ダブルクリック起動)
+│       │       └── store.rs          # Moon Store (ローカルカタログ・ワンクリック起動)
 │       ├── net/
 │       │   ├── mod.rs             # NIC状態管理・送受信・デモ実行
 │       │   ├── arp.rs              # ARP (要求/応答/キャッシュ)
@@ -127,16 +137,20 @@ moon-os/
 │       │   └── dns.rs              # 簡易DNSリゾルバ (Aレコードのみ)
 │       ├── sched.rs               # プリエンプティブ・ラウンドロビンスケジューラ (CR3切替込み)
 │       ├── syscall.rs             # int 0x80 システムコールハンドラ
-│       └── elf.rs                 # ELF64ローダー (静的ET_EXECのみ)
-├── userland/
-│   └── init/                # 最小ユーザーランドテストプログラム (カーネルとは独立したcrate)
-│       ├── Cargo.toml         # 独立ワークスペース ([workspace] 空定義でルートから分離)
-│       ├── .cargo/config.toml  # target=x86_64-unknown-none (kernelの code-model=kernel は継承しない)
-│       ├── build.rs            # リンカスクリプトの指定
-│       ├── linker.ld            # ロードアドレス0x400000固定のリンカスクリプト
-│       └── src/main.rs          # int 0x80 でSYS_WRITE→SYS_EXITを呼ぶだけの最小プログラム
+│       ├── elf.rs                 # ELF64ローダー (静的ET_EXECのみ)
+│       ├── pkg.rs                 # .mapp パッケージ形式 (build/parse/list/run)
+│       └── process.rs             # ELFロード+アドレス空間+スケジューラ登録のヘルパー
+├── userland/                 # ユーザーランドテストプログラム (カーネルとは独立したcrate群)
+│   ├── init/                   # int 0x80 でSYS_WRITE→SYS_EXITを呼ぶだけの最小プログラム
+│   │   ├── Cargo.toml            # 独立ワークスペース ([workspace] 空定義でルートから分離)
+│   │   ├── .cargo/config.toml     # target=x86_64-unknown-none (kernelの code-model=kernel は継承しない)
+│   │   ├── build.rs               # リンカスクリプトの指定
+│   │   ├── linker.ld               # ロードアドレス0x400000固定のリンカスクリプト
+│   │   └── src/main.rs             # エントリポイント
+│   └── counter/                # ループしながら tick 0..4 を出力する2個目のテストアプリ
+│       └── (initと同じ構成)
 └── tools/
-    ├── build.sh              # userland/init → カーネルの順にビルドし、ISO作成
+    ├── build.sh              # userland/* → カーネルの順にビルドし、ISO作成
                                  # (Limineは初回実行時に自動取得)
     └── run.sh                # ISOをQEMUで起動
 ```
@@ -206,7 +220,8 @@ net: configured ip=10.0.2.15 mask=255.255.255.0 gateway=10.0.2.2 dns=10.0.2.3
 icmp: echo reply from 10.0.2.2 seq=1
 net: ping to gateway 10.0.2.2 succeeded
 net: DNS example.com -> 104.20.23.154
-elf: init process loaded, entry=0x400000, user stack top=0x70000000
+pkg: installed 2 bundled package(s) into /apps
+pkg: running init
 scheduler: 3 task(s) spawned
 keyboard: IRQ1 unmasked
 mouse: enabled, IRQ12 unmasked
@@ -229,13 +244,13 @@ qemu-system-x86_64 -M q35 -m 256M -cdrom build/moon-os.iso \
     -serial stdio -display none -no-reboot -no-shutdown
 ```
 
-## 次の開発ステップ (M7残り: パッケージ管理 / アプリ基盤)
+## 次の開発ステップ (M8: EXE/APK 互換レイヤー)
 
-M7のユーザーモード基盤 (リング3実行・`int 0x80`システムコール・ELF64ローダー・
-プロセスごとのアドレス空間) は完了しました。残っているのは:
+M7 (ユーザーモード基盤 + パッケージ管理/アプリ基盤) は完了しました。ターミナルで
+`pkg list` / `pkg run <name>`、GUIのファイルマネージャー/Moon Storeからも
+`.mapp`パッケージ (`init`/`counter`) を実際にリング3プロセスとして起動できます。
 
-- moon OS ネイティブアプリの実行形式定義 (署名・依存関係メタデータ等)
-- ダブルクリックでのアプリ起動 (ファイルマネージャー連携)
-- パッケージマネージャー / Moon Store
+次は M8 (EXE/APK 互換レイヤー) — PEローダー + Win32 API サブセット、
+APKコンテナ解析からの段階的な互換レイヤー構築です。
 
 詳細は [ROADMAP.md](ROADMAP.md) を参照してください。

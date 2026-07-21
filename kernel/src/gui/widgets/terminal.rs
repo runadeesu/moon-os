@@ -55,7 +55,7 @@ impl TerminalState {
         match parts.next() {
             Some("help") => {
                 self.push_line(String::from(
-                    "commands: help, clear, uptime, mem, echo <text>",
+                    "commands: help, clear, uptime, mem, echo <text>, pkg list, pkg run <name>",
                 ));
             }
             Some("clear") => self.lines.clear(),
@@ -79,8 +79,41 @@ impl TerminalState {
                 let rest: Vec<&str> = parts.collect();
                 self.push_line(rest.join(" "));
             }
+            Some("pkg") => self.run_pkg_command(parts.next(), parts.next()),
             Some(other) => self.push_line(alloc::format!("unknown command: {}", other)),
             None => {}
+        }
+    }
+
+    fn run_pkg_command(&mut self, sub: Option<&str>, arg: Option<&str>) {
+        match sub {
+            Some("list") => {
+                let packages = crate::pkg::installed();
+                if packages.is_empty() {
+                    self.push_line(String::from("no packages installed"));
+                }
+                for p in packages {
+                    self.push_line(alloc::format!("{} {} ({})", p.name, p.version, p.file_name));
+                }
+            }
+            Some("run") => match arg {
+                Some(name) => {
+                    let target = crate::pkg::installed()
+                        .into_iter()
+                        .find(|p| p.name == name)
+                        .map(|p| p.file_name);
+                    match target {
+                        Some(file_name) => match crate::pkg::run(&file_name) {
+                            Ok(name) => self.push_line(alloc::format!("running {}", name)),
+                            Err(err) => self.push_line(alloc::format!("pkg run failed: {}", err)),
+                        },
+                        None => self.push_line(alloc::format!("no such package: {}", name)),
+                    }
+                }
+                None => self.push_line(String::from("usage: pkg run <name>")),
+            },
+            Some(other) => self.push_line(alloc::format!("unknown pkg subcommand: {}", other)),
+            None => self.push_line(String::from("usage: pkg list | pkg run <name>")),
         }
     }
 

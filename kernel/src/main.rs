@@ -19,6 +19,8 @@ mod i18n;
 mod limine;
 mod memory;
 mod net;
+mod pkg;
+mod process;
 mod sched;
 mod syscall;
 
@@ -169,7 +171,12 @@ extern "C" fn kmain() -> ! {
 
     sched::spawn(task_a);
     sched::spawn(task_b);
-    spawn_init_process();
+
+    install_bundled_packages();
+    match pkg::run("/apps/init.mapp") {
+        Ok(name) => crate::serial_println!("pkg: running {}", name),
+        Err(err) => crate::serial_println!("pkg: failed to run init.mapp: {}", err),
+    }
     crate::serial_println!("scheduler: {} task(s) spawned", sched::task_count());
 
     arch::x86_64::pit::init(100);
@@ -191,48 +198,29 @@ extern "C" fn kmain() -> ! {
     halt();
 }
 
-/// The userland test binary (`userland/init`, a separate standalone crate --
-/// see its build.rs and kernel/build.rs for how the path gets here),
-/// embedded directly into the kernel image. There's no filesystem-backed
-/// process loading yet (that waits on a real on-disk package format, M7's
-/// longer-term goal); this is the "does ring 3 + syscalls + the ELF loader
-/// actually work end to end" proof.
+/// The userland test binaries (`userland/init`, `userland/counter` --
+/// separate standalone crates; see their build.rs's and kernel/build.rs for
+/// how these paths get here), embedded directly into the kernel image.
+/// There's no on-disk package repository yet -- these get wrapped into
+/// `.mapp` packages and written into RAMFS at boot (see `install_packages`)
+/// so the package manager, File Manager, and Moon Store all have something
+/// real to list/install/run through the same format real packages would
+/// use later.
 static INIT_ELF: &[u8] = include_bytes!(env!("USERLAND_INIT_ELF"));
+static COUNTER_ELF: &[u8] = include_bytes!(env!("USERLAND_COUNTER_ELF"));
 
-const USER_STACK_TOP: u64 = 0x0000_0000_7000_0000;
-const USER_STACK_PAGES: u64 = 4;
-
-/// Loads `INIT_ELF` into a fresh address space and hands it to the
-/// scheduler as a ring-3 task.
-fn spawn_init_process() {
-    let space = memory::paging::AddressSpace::new();
-
-    let loaded = match elf::load(&space, INIT_ELF) {
-        Ok(loaded) => loaded,
-        Err(err) => {
-            crate::serial_println!("elf: failed to load init process: {}", err);
-            return;
-        }
-    };
-
-    let stack_base = USER_STACK_TOP - USER_STACK_PAGES * 4096;
-    for i in 0..USER_STACK_PAGES {
-        let frame = memory::pmm::alloc_frame().expect("out of memory for the init user stack");
-        space.map(
-            stack_base + i * 4096,
-            frame,
-            memory::paging::FLAG_PRESENT
-                | memory::paging::FLAG_WRITABLE
-                | memory::paging::FLAG_USER,
-        );
-    }
-
-    crate::serial_println!(
-        "elf: init process loaded, entry={:#x}, user stack top={:#x}",
-        loaded.entry,
-        USER_STACK_TOP
+/// Wraps the bundled test binaries as `.mapp` packages and writes them into
+/// RAMFS, so everything downstream (pkg::installed/run, the File Manager,
+/// Moon Store) operates on real files through the real package format
+/// rather than special-cased embedded bytes.
+fn install_bundled_packages() {
+    let mut root = fs::root().lock();
+    root.write("/apps/init.mapp", &pkg::build("init", "0.1.0", INIT_ELF));
+    root.write(
+        "/apps/counter.mapp",
+        &pkg::build("counter", "0.1.0", COUNTER_ELF),
     );
-    sched::spawn_user(loaded.entry, USER_STACK_TOP, space);
+    crate::serial_println!("pkg: installed 2 bundled package(s) into /apps");
 }
 
 static TASK_A_ITERS: AtomicU64 = AtomicU64::new(0);

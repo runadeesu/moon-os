@@ -23,7 +23,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use desktop::Star;
 use spin::Mutex;
-use widgets::{settings::SettingsState, terminal::TerminalState};
+use widgets::{
+    files::FileManagerState, settings::SettingsState, store::StoreState, terminal::TerminalState,
+};
 use window::{Window, WindowContent};
 
 struct GuiState {
@@ -92,6 +94,35 @@ pub fn init() {
         h: 150,
         title: String::from("Settings"),
         content: WindowContent::Settings(SettingsState),
+    });
+
+    let second_col = content_left + 460 + 40;
+
+    let id = gui.next_id;
+    gui.next_id += 1;
+    gui.windows.push(Window {
+        id,
+        x: second_col,
+        y: content_top,
+        w: 420,
+        h: 260,
+        title: String::from("Files"),
+        content: WindowContent::Files(FileManagerState::new()),
+    });
+
+    let id = gui.next_id;
+    gui.next_id += 1;
+    gui.windows.push(Window {
+        id,
+        x: second_col,
+        y: content_top + 260 + 40,
+        w: 420,
+        h: 150,
+        // Distinct from "Settings" for the dock icon letter (both start
+        // with S otherwise); the title bar itself still reads "Moon Store"
+        // (see `Window::title_bytes`).
+        title: String::from("Moon"),
+        content: WindowContent::Store(StoreState::new()),
     });
     drop(gui);
 

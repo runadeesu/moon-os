@@ -8,15 +8,23 @@ fn main() {
     println!("cargo:rustc-link-arg=-z");
     println!("cargo:rustc-link-arg=max-page-size=0x1000");
 
-    // The userland test binary (`userland/init`) is a separate, standalone
-    // cargo project (its own linker script/target base address), built
-    // first by tools/build.sh, which exports this env var. Falls back to
-    // the same path tools/build.sh uses, so a plain `cargo build` still
-    // works once that binary's been built at least once.
-    let init_elf = std::env::var("USERLAND_INIT_ELF").unwrap_or_else(|_| {
-        format!("{manifest_dir}/../userland/init/target/x86_64-unknown-none/release/init")
-    });
-    println!("cargo:rustc-env=USERLAND_INIT_ELF={init_elf}");
-    println!("cargo:rerun-if-env-changed=USERLAND_INIT_ELF");
-    println!("cargo:rerun-if-changed={init_elf}");
+    // The userland test binaries (`userland/init`, `userland/counter`) are
+    // separate, standalone cargo projects (their own linker scripts/target
+    // base addresses), built first by tools/build.sh, which exports these
+    // env vars. Each falls back to the same path tools/build.sh uses, so a
+    // plain `cargo build` still works once those binaries have been built
+    // at least once.
+    for (env_var, crate_name) in [
+        ("USERLAND_INIT_ELF", "init"),
+        ("USERLAND_COUNTER_ELF", "counter"),
+    ] {
+        let path = std::env::var(env_var).unwrap_or_else(|_| {
+            format!(
+                "{manifest_dir}/../userland/{crate_name}/target/x86_64-unknown-none/release/{crate_name}"
+            )
+        });
+        println!("cargo:rustc-env={env_var}={path}");
+        println!("cargo:rerun-if-env-changed={env_var}");
+        println!("cargo:rerun-if-changed={path}");
+    }
 }

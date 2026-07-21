@@ -1,4 +1,4 @@
 /target
 /build
 /third_party
-/userland/init/target
+/userland/*/target

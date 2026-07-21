@@ -1,7 +1,9 @@
 //! A window: a titled, draggable, focusable rectangle on the desktop,
 //! hosting one built-in widget.
 
-use super::widgets::{settings::SettingsState, terminal::TerminalState};
+use super::widgets::{
+    files::FileManagerState, settings::SettingsState, store::StoreState, terminal::TerminalState,
+};
 use crate::framebuffer;
 use alloc::string::String;
 
@@ -10,6 +12,8 @@ pub const TITLE_BAR_HEIGHT: i32 = 18;
 pub enum WindowContent {
     Terminal(TerminalState),
     Settings(SettingsState),
+    Files(FileManagerState),
+    Store(StoreState),
 }
 
 pub struct Window {
@@ -53,18 +57,24 @@ impl Window {
     /// forwarded here from `gui::on_mouse` for clicks that land inside a
     /// window's body rather than its title bar.
     pub fn handle_click(&mut self, x: i32, y: i32) {
-        if let WindowContent::Settings(settings) = &mut self.content {
-            settings.handle_click(x, y);
+        match &mut self.content {
+            WindowContent::Settings(settings) => settings.handle_click(x, y),
+            WindowContent::Files(files) => files.handle_click(x, y),
+            WindowContent::Store(store) => store.handle_click(x, y),
+            WindowContent::Terminal(_) => {}
         }
     }
 
-    /// The title text: fixed "Terminal" for the terminal (a technical term
-    /// left untranslated, like a real desktop keeps app/protocol names), and
+    /// The title text: fixed English for content that's a technical
+    /// term/proper noun (Terminal, File Manager, Moon Store -- like a real
+    /// desktop keeps app/protocol names untranslated), and
     /// `crate::i18n`-translated for Settings.
     fn title_bytes(&self) -> &'static [u8] {
         match &self.content {
             WindowContent::Terminal(_) => b"Terminal",
             WindowContent::Settings(_) => crate::i18n::tr(crate::i18n::Key::SettingsTitle),
+            WindowContent::Files(_) => b"File Manager",
+            WindowContent::Store(_) => b"Moon Store",
         }
     }
 
@@ -100,6 +110,8 @@ impl Window {
         match &self.content {
             WindowContent::Terminal(terminal) => terminal.render(self.x, content_y, self.w, self.h),
             WindowContent::Settings(settings) => settings.render(self.x, content_y, self.w, self.h),
+            WindowContent::Files(files) => files.render(self.x, content_y, self.w, self.h),
+            WindowContent::Store(store) => store.render(self.x, content_y, self.w, self.h),
         }
     }
 }
