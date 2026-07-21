@@ -1,0 +1,24 @@
+[package]
+name = "moon_kernel"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "moon_kernel"
+path = "src/main.rs"
+
+[dependencies]
+# Limine boot protocol request/response structures only.
+# The bootloader itself (Limine) is a vendored third-party project;
+# everything past the entry point (GDT/IDT/paging/drivers/console/...) is our own code.
+limine = "0.2"
+spin = { version = "0.9", default-features = false, features = ["spin_mutex"] }
+
+[profile.dev]
+panic = "abort"
+opt-level = 1
+
+[profile.release]
+panic = "abort"
+lto = true
+opt-level = 2
