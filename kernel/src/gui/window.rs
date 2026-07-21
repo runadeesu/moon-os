@@ -164,8 +164,13 @@ impl Window {
     }
 
     pub fn handle_char(&mut self, ch: u8) {
-        if let WindowContent::Terminal(terminal) = &mut self.content {
-            terminal.handle_char(ch);
+        match &mut self.content {
+            WindowContent::Terminal(terminal) => terminal.handle_char(ch),
+            // Both widgets' search boxes need typed input too -- previously
+            // unwired, so search wasn't a real feature, just a display.
+            WindowContent::Files(files) => files.handle_char(ch),
+            WindowContent::Store(store) => store.handle_char(ch),
+            WindowContent::Settings(_) => {}
         }
     }
 
