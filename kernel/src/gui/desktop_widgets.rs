@@ -9,7 +9,6 @@ use alloc::format;
 
 pub const PANEL_W: u32 = 200;
 const GAP: i32 = 12;
-const NEON: (u8, u8, u8) = (0x30, 0xE0, 0xFF);
 
 const DAYS_IN_MONTH: [u8; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
 
@@ -47,10 +46,11 @@ fn render_calendar(x: i32, y: i32) -> i32 {
         DAYS_IN_MONTH[month_idx]
     };
     let first_wd = weekday_of_first(dt.year, dt.month);
+    let neon = super::theme::accent();
 
     let panel_h = 152u32;
     framebuffer::with(|c| {
-        c.glow_border(x, y, PANEL_W, panel_h, NEON);
+        c.glow_border(x, y, PANEL_W, panel_h, neon);
         c.blend_rect(x, y, PANEL_W, panel_h, (0x10, 0x14, 0x22), 200);
         c.draw_str_at(
             x + 8,
@@ -88,7 +88,7 @@ fn render_calendar(x: i32, y: i32) -> i32 {
         framebuffer::with(|c| {
             if is_today {
                 c.fill_rect(cx - 2, cy - 2, 18, 12, (0x0E, 0x4A, 0x60));
-                c.glow_border(cx - 2, cy - 2, 18, 12, NEON);
+                c.glow_border(cx - 2, cy - 2, 18, 12, neon);
             }
             c.draw_str_at(cx, cy, &format!("{:2}", day), (0xD8, 0xD8, 0xD8), None);
         });
@@ -108,10 +108,11 @@ fn render_system_monitor(x: i32, y: i32) -> i32 {
     let free_mib = (stats.free_frames * 4096) / (1024 * 1024);
     let total_mib = (stats.total_frames * 4096) / (1024 * 1024);
     let ticks = crate::sched::ticks();
+    let neon = super::theme::accent();
 
     let panel_h = 90u32;
     framebuffer::with(|c| {
-        c.glow_border(x, y, PANEL_W, panel_h, NEON);
+        c.glow_border(x, y, PANEL_W, panel_h, neon);
         c.blend_rect(x, y, PANEL_W, panel_h, (0x10, 0x14, 0x22), 200);
         c.draw_glyphs_at(
             x + 8,

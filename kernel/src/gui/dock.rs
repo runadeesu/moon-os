@@ -12,9 +12,9 @@ const ICON_SIZE: i32 = 40;
 const ICON_GAP: i32 = 10;
 const TOP_MARGIN: i32 = 16;
 const ICON_X: i32 = 8;
-const NEON: (u8, u8, u8) = (0x30, 0xE0, 0xFF);
 
 pub fn render(windows: &[Window], focused_id: Option<u32>, screen_h: usize, top_offset: i32) {
+    let neon = super::theme::accent();
     framebuffer::with(|c| {
         c.blend_rect(
             0,
@@ -25,8 +25,8 @@ pub fn render(windows: &[Window], focused_id: Option<u32>, screen_h: usize, top_
             215,
         );
         // Glowing right edge, matching the top bar's HUD-panel accent.
-        c.blend_rect(WIDTH as i32, top_offset, 1, screen_h as u32, NEON, 130);
-        c.blend_rect(WIDTH as i32 + 1, top_offset, 1, screen_h as u32, NEON, 55);
+        c.blend_rect(WIDTH as i32, top_offset, 1, screen_h as u32, neon, 130);
+        c.blend_rect(WIDTH as i32 + 1, top_offset, 1, screen_h as u32, neon, 55);
     });
 
     let mut y = top_offset + TOP_MARGIN;
@@ -40,14 +40,14 @@ pub fn render(windows: &[Window], focused_id: Option<u32>, screen_h: usize, top_
         let letter = w.title.as_bytes().first().copied().unwrap_or(b'?');
         framebuffer::with(|c| {
             if active {
-                c.glow_border(ICON_X, y, ICON_SIZE as u32, ICON_SIZE as u32, NEON);
+                c.glow_border(ICON_X, y, ICON_SIZE as u32, ICON_SIZE as u32, neon);
             }
             c.fill_rect(ICON_X, y, ICON_SIZE as u32, ICON_SIZE as u32, bg);
             c.draw_char_at(
                 ICON_X + (ICON_SIZE - 8) / 2,
                 y + (ICON_SIZE - 8) / 2,
                 letter,
-                if active { NEON } else { (0xE0, 0xE0, 0xE0) },
+                if active { neon } else { (0xE0, 0xE0, 0xE0) },
                 None,
             );
         });

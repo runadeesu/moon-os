@@ -1,9 +1,11 @@
 //! A settings/system-info widget: live memory, scheduler, and uptime
-//! stats, plus the one thing that's actually configurable so far -- the UI
-//! language (`crate::i18n`), changed by clicking its row. A fuller settings
-//! app (with real subsystems to configure) waits on having more of them;
-//! for now this doubles as a live dashboard proving the window system can
-//! host more than one kind of content.
+//! stats, plus what's actually configurable -- UI language (`crate::i18n`),
+//! the accent color (`super::super::theme`), and real power actions
+//! (reboot/shutdown, `crate::power`) -- each changed/triggered by clicking
+//! its row. Network/Bluetooth/mouse/account/privacy panels aren't here
+//! because there's no real subsystem behind them yet (no Wi-Fi/Bluetooth
+//! driver, no account system) -- adding toggles for those would just be
+//! decoration, not settings.
 
 use crate::framebuffer;
 use crate::i18n::{self, Key};
@@ -15,19 +17,29 @@ const MEMORY_Y: i32 = HEADER_Y + ROW_H;
 const TASKS_Y: i32 = MEMORY_Y + ROW_H;
 const UPTIME_Y: i32 = TASKS_Y + ROW_H;
 const LANG_Y: i32 = UPTIME_Y + ROW_H + 6;
-const HINT_Y: i32 = LANG_Y + ROW_H;
-
-const ACCENT: (u8, u8, u8) = (0x30, 0xE0, 0xFF);
+const ACCENT_Y: i32 = LANG_Y + ROW_H;
+const HINT_Y: i32 = ACCENT_Y + ROW_H;
+const POWER_Y: i32 = HINT_Y + ROW_H + 6;
 
 pub struct SettingsState;
 
 impl SettingsState {
     /// `x`/`y` here are local to the widget's content area (already offset
     /// past the window's title bar by the caller, `Window::handle_click`).
-    /// Clicking anywhere on the language row cycles to the next language.
-    pub fn handle_click(&mut self, _x: i32, y: i32) {
+    /// Clicking the language row cycles the UI language, the accent row
+    /// cycles the accent color, and the power row's two halves trigger a
+    /// real reboot/shutdown.
+    pub fn handle_click(&mut self, x: i32, y: i32) {
         if (LANG_Y - 2..LANG_Y + ROW_H).contains(&y) {
             i18n::cycle();
+        } else if (ACCENT_Y - 2..ACCENT_Y + ROW_H).contains(&y) {
+            super::super::theme::cycle_accent();
+        } else if (POWER_Y - 2..POWER_Y + ROW_H).contains(&y) {
+            if x < 90 {
+                crate::power::reboot();
+            } else {
+                crate::power::shutdown();
+            }
         }
     }
 
@@ -79,6 +91,7 @@ impl SettingsState {
                 None,
             );
 
+            let accent = crate::gui::theme::accent();
             let lang_line = alloc::format!("Lang: {}", i18n::current().name()).to_string();
             c.fill_rect(
                 x + 2,
@@ -87,7 +100,17 @@ impl SettingsState {
                 (ROW_H + 2) as u32,
                 (0x14, 0x2A, 0x36),
             );
-            c.draw_str_at(x + 6, y + LANG_Y, &lang_line, ACCENT, None);
+            c.draw_str_at(x + 6, y + LANG_Y, &lang_line, accent, None);
+
+            let accent_line = alloc::format!("Accent: {}", crate::gui::theme::accent_name());
+            c.fill_rect(
+                x + 2,
+                y + ACCENT_Y - 2,
+                w - 4,
+                (ROW_H + 2) as u32,
+                (0x14, 0x2A, 0x36),
+            );
+            c.draw_str_at(x + 6, y + ACCENT_Y, &accent_line, accent, None);
 
             c.draw_glyphs_at(
                 x + 6,
@@ -96,6 +119,23 @@ impl SettingsState {
                 (0x70, 0x80, 0x90),
                 None,
             );
+
+            c.fill_rect(
+                x + 2,
+                y + POWER_Y - 2,
+                84,
+                (ROW_H + 2) as u32,
+                (0x3A, 0x1A, 0x1A),
+            );
+            c.draw_str_at(x + 6, y + POWER_Y, "Reboot", (0xE8, 0xA0, 0xA0), None);
+            c.fill_rect(
+                x + 92,
+                y + POWER_Y - 2,
+                84,
+                (ROW_H + 2) as u32,
+                (0x3A, 0x1A, 0x1A),
+            );
+            c.draw_str_at(x + 96, y + POWER_Y, "Shutdown", (0xE8, 0xA0, 0xA0), None);
         });
     }
 }

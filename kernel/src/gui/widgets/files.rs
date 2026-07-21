@@ -361,20 +361,21 @@ impl FileManagerState {
             };
             c.draw_str_at(x + 4, y + 4, &path_label, (0x90, 0xC0, 0xFF), None);
 
+            let neon = crate::gui::theme::accent();
             let list_color = if self.view == ViewMode::List {
-                (0x30, 0xE0, 0xFF)
+                neon
             } else {
                 (0x80, 0x80, 0x90)
             };
             let grid_color = if self.view == ViewMode::Grid {
-                (0x30, 0xE0, 0xFF)
+                neon
             } else {
                 (0x80, 0x80, 0x90)
             };
             c.draw_str_at(x + 4, y + HEADER_H + 2, "[List]", list_color, None);
             c.draw_str_at(x + 52, y + HEADER_H + 2, "[Grid]", grid_color, None);
             let search_color = if self.searching {
-                (0x30, 0xE0, 0xFF)
+                neon
             } else {
                 (0x80, 0x80, 0x90)
             };

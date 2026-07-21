@@ -210,8 +210,8 @@ impl Window {
     }
 
     pub fn render(&self, focused: bool, now: u64) {
-        const NEON: (u8, u8, u8) = (0x30, 0xE0, 0xFF);
-        let border = if focused { NEON } else { (0x50, 0x50, 0x58) };
+        let neon = super::theme::accent();
+        let border = if focused { neon } else { (0x50, 0x50, 0x58) };
         let title_bg = if focused {
             (0x0C, 0x28, 0x38)
         } else {
@@ -238,7 +238,7 @@ impl Window {
 
         framebuffer::with(|c| {
             if focused {
-                c.glow_border(self.x - 1, self.y - 1, self.w + 2, outer_h, NEON);
+                c.glow_border(self.x - 1, self.y - 1, self.w + 2, outer_h, neon);
             }
             c.fill_rect(self.x - 1, self.y - 1, self.w + 2, outer_h, border);
             c.fill_rect(self.x, self.y, self.w, TITLE_BAR_HEIGHT as u32, title_bg);
@@ -282,7 +282,7 @@ impl Window {
             }
 
             if focused {
-                c.draw_corner_brackets(self.x - 1, self.y - 1, self.w + 2, outer_h, NEON);
+                c.draw_corner_brackets(self.x - 1, self.y - 1, self.w + 2, outer_h, neon);
             }
         });
 

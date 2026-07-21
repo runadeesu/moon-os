@@ -23,6 +23,7 @@ mod desktop;
 pub mod desktop_widgets;
 pub mod dock;
 pub mod notifications;
+pub mod theme;
 pub mod topbar;
 pub mod widgets;
 pub mod window;
@@ -451,7 +452,7 @@ pub fn redraw() {
 
     if let Some((sx, sy, sw, sh)) = gui.snap_preview {
         framebuffer::with(|c| {
-            c.blend_rect(sx, sy, sw, sh, (0x30, 0xE0, 0xFF), 60);
+            c.blend_rect(sx, sy, sw, sh, theme::accent(), 60);
         });
     }
 
@@ -484,7 +485,7 @@ pub fn redraw() {
 fn render_context_menu(menu: &ContextMenu) {
     let h = menu.items.len() as u32 * MENU_ROW_H as u32;
     framebuffer::with(|c| {
-        c.glow_border(menu.x, menu.y, MENU_W as u32, h, (0x30, 0xE0, 0xFF));
+        c.glow_border(menu.x, menu.y, MENU_W as u32, h, theme::accent());
         c.blend_rect(menu.x, menu.y, MENU_W as u32, h, (0x14, 0x18, 0x24), 235);
         for (i, (label, _)) in menu.items.iter().enumerate() {
             let row_y = menu.y + i as i32 * MENU_ROW_H;

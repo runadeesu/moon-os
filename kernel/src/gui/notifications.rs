@@ -70,7 +70,7 @@ pub fn render(x_right: i32, top: i32) {
             220
         };
         let color = match n.kind {
-            Kind::Info => (0x30, 0xE0, 0xFF),
+            Kind::Info => super::theme::accent(),
             Kind::Success => (0x50, 0xE8, 0x90),
             Kind::Warning => (0xE8, 0xC8, 0x40),
             Kind::Error => (0xE8, 0x58, 0x58),
