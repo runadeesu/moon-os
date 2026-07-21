@@ -16,6 +16,16 @@ done
 export USERLAND_INIT_ELF="$ROOT_DIR/userland/init/target/x86_64-unknown-none/release/init"
 export USERLAND_COUNTER_ELF="$ROOT_DIR/userland/counter/target/x86_64-unknown-none/release/counter"
 
+echo "==> Building PE/Win32 test binary (hand-built, no Windows toolchain available)"
+(cd "$ROOT_DIR/tools/pe_test" && \
+    nasm -f bin section.asm -o section.bin && \
+    python3 pack_pe.py section.bin hello_pe.exe)
+export PE_TEST_EXE="$ROOT_DIR/tools/pe_test/hello_pe.exe"
+
+echo "==> Building APK test fixture"
+(cd "$ROOT_DIR/tools/apk_test" && python3 make_apk.py test.apk)
+export APK_TEST_FILE="$ROOT_DIR/tools/apk_test/test.apk"
+
 echo "==> Building kernel ($PROFILE)"
 (cd "$ROOT_DIR" && cargo build -p moon_kernel --profile "$([ "$PROFILE" = release ] && echo release || echo dev)")
 

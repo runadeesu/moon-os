@@ -183,9 +183,37 @@
       「ストア」と「インストール済み」が同じRAMFSの中身を指す(将来のダウンロード/
       インストールフローの土台となるUIシェル)
 
-### M8 — 互換レイヤー
-- [ ] EXE 互換レイヤー (PEローダー + Win32 API サブセットの独自実装、段階的拡張)
-- [ ] APK 互換レイヤー (Androidランタイム相当。既存 OSS ランタイムとの連携方針を含めて設計)
+### M8 — 互換レイヤー (第一歩 完了)
+- [x] EXE 互換レイヤー: PE32+ ローダー (`kernel/src/pe.rs`) — DOS/NT/COFF/オプション
+      ヘッダーとセクションテーブルを解析(自作テストバイナリに限らず、well-formedな
+      x86_64 PE32+イメージ全般に対応する汎用パーサー)、セクションを新規`AddressSpace`
+      にマッピング。Win32 API サブセット: インポートディレクトリテーブルを解析し、
+      `KERNEL32.DLL`の`ExitProcess`/`WriteConsoleA`のみ対応 — Win64呼び出し規約
+      (rcx/rdx/r8/r9)をmoon OS独自の`int 0x80`ABI(rdi/rsi)に変換する極小サンクを
+      カーネル内のnaked関数テンプレートから実行時にプロセスのアドレス空間へコピーし、
+      IAT(Import Address Table)を書き換えて解決。実際のWindowsクロスツールチェーンが
+      無い環境のため、テスト用EXEはNASMで手書きアセンブルしPythonスクリプトで
+      PE32+ヘッダーを構築(`tools/pe_test/`) — objdumpで正当なPE32+/インポート
+      テーブルとして認識されることを確認済み。QEMU実機でロード→
+      `WriteConsoleA`経由の文字列出力→`ExitProcess`による正常終了までEnd-to-Endで
+      動作確認(段階的拡張の第一歩。実際のWin32アプリを動かすには対応API関数を
+      大幅に増やす必要があり、今回はローダー本体とサンク機構の実証に留める)
+- [x] APK 互換レイヤー: ZIPコンテナリーダー + AXMLヘッダー検証 (`kernel/src/apk.rs`) —
+      APKはZIPアーカイブなので、End Of Central Directoryレコードの後方探索、
+      セントラルディレクトリ/ローカルファイルヘッダー解析を実装し、
+      `AndroidManifest.xml`を取り出してAndroid Binary XML(AXML)の
+      ResChunk_header(type/headerSize/size)を検証。正直な制約:
+      DEFLATE展開は未実装(STOREDのみ対応 — 実際のAPKはほぼ全てDEFLATE圧縮のため、
+      本物のAPKのマニフェストはまだ読めない)、AXMLの文字列プール/要素ツリー解析は
+      未実装、Dalvik/ARTバイトコード実行は「パーサーを増やす」話ではなく実質的な
+      Androidランタイム統合が必要なため今回は範囲外 — テスト用APK
+      (`tools/apk_test/`、Python`zlib.crc32`で正しいCRCを計算し手書きで構築、
+      Pythonの`zipfile`モジュールで独立検証済み)でQEMU実機確認
+
+補足: EXE/APKレイヤーはいずれも「本物の実行ファイル形式を正しく解析できる
+ローダー」という第一歩であり、実用的な互換性(実際のexe/apkを動かす)には
+Win32 API/Androidランタイムの大幅な拡張が今後も必要。詳細は各モジュールの
+doc commentに正直に記載。
 
 ### M9 — マルチメディア/その他
 - [ ] オーディオスタック (AC97/HDA ドライバ + ミキサー)
@@ -221,5 +249,17 @@ Moon Store)も完了。`.mapp`パッケージ形式、2個目のユーザーラ�
 ターミナルから`pkg run counter`を実行して新規リング3プロセスが実際に起動し
 (`tick 0`〜`tick 4`→`counter app done`を出力して正常終了)、既存タスクが
 継続することを確認済み。
-次は M8 (EXE/APK互換レイヤー) に進む。詳細は各コミットログおよび README.md の
-ビルド手順を参照。
+
+M8 (互換レイヤーの第一歩) も完了。PE32+ローダー(`kernel/src/pe.rs`)がDOS/NT/
+COFF/オプションヘッダーとセクションを解析し、`KERNEL32.DLL`の`ExitProcess`/
+`WriteConsoleA`の2関数についてWin64呼び出し規約→moon OS独自`int 0x80` ABIへの
+変換サンクを実行時合成、IATを書き換えて解決。Windowsクロスツールチェーンが
+無い環境のためテストEXEはNASM手書き+Pythonパッカーで構築 — QEMU実機で
+ロード→`WriteConsoleA`出力→`ExitProcess`終了までEnd-to-End確認済み。
+APK側はZIPコンテナリーダー+AndroidManifest.xmlのAXMLヘッダー検証
+(`kernel/src/apk.rs`)を実装、実機確認済み。DEFLATE展開・AXML要素ツリー解析・
+実際のDalvik/ART実行はいずれも今後の課題として正直に文書化(詳細はM8セクション
+参照)。
+次は M9 (オーディオ/ブラウザ/AIアシスタント) や、M7残りの発展(実アプリ形式の
+署名・依存解決)、EXE/APKレイヤーの拡張などに進む。詳細は各コミットログおよび
+README.md のビルド手順を参照。

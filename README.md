@@ -5,7 +5,7 @@ Windows・macOS・Linux・Android のいいところを参考にした、完全�
 
 現在のマイルストーンや今後の計画は [ROADMAP.md](ROADMAP.md) を参照してください。
 
-## 現状 (M0〜M7 基本部分 完了)
+## 現状 (M0〜M8 基本部分 完了)
 
 - 独自64bitカーネル (Rust, `no_std` / stable toolchain, ナイトリー不要)
 - ブートローダーは [Limine](https://github.com/limine-bootloader/limine) を採用
@@ -65,9 +65,23 @@ Windows・macOS・Linux・Android のいいところを参考にした、完全�
   Moon Store(`gui/widgets/store.rs`、ローカルカタログ+ワンクリック起動)から
   実際に2つ目のユーザーランドテストアプリ(`userland/counter`)を起動できることを
   QEMU実機で確認済み
+- EXE互換レイヤー: PE32+ローダー (`kernel/src/pe.rs`) — DOS/NT/COFF/オプション
+  ヘッダーとセクションテーブルを解析(任意のwell-formedなx86_64 PE32+イメージに
+  対応する汎用パーサー)、`KERNEL32.DLL`の`ExitProcess`/`WriteConsoleA`のみだが
+  実際にWin64呼び出し規約→moon OS独自`int 0x80` ABIへの変換サンクを実行時合成し
+  IATを書き換えて解決。Windowsクロスツールチェーンが無い環境のため、テスト用EXEは
+  NASM手書きアセンブル+Pythonスクリプトによるヘッダー構築 (`tools/pe_test/`)。
+  QEMU実機でロード→`WriteConsoleA`出力→`ExitProcess`終了までEnd-to-End確認済み
+  (段階的拡張の第一歩、詳細はROADMAP.md参照)
+- APK互換レイヤー: ZIPコンテナリーダー + AXMLヘッダー検証 (`kernel/src/apk.rs`) —
+  End Of Central Directoryの後方探索を含む本物のZIP解析で`AndroidManifest.xml`を
+  取り出し、Android Binary XML(AXML)のResChunk_headerを検証。DEFLATE展開・
+  AXML要素ツリー解析・Dalvik/ART実行はまだ未実装で、正直にドキュメント化済み
+  (詳細はROADMAP.md参照)
 - QEMU (BIOS/UEFI 両方) での起動・ヒープ動作・マルチタスク・キーボード/マウス入力・
   ディスクI/O・ウィンドウのドラッグ操作/フォーカス切り替え/ターミナル操作・
-  DHCP/ping/DNSによる実ネットワーク往復・リング3ユーザープロセスの実行を実機確認済み
+  DHCP/ping/DNSによる実ネットワーク往復・リング3ユーザープロセスの実行・
+  PE32+/Win32サブセット実行・APKコンテナ解析を実機確認済み
 
 ## リポジトリ構成
 
@@ -138,8 +152,10 @@ moon-os/
 │       ├── sched.rs               # プリエンプティブ・ラウンドロビンスケジューラ (CR3切替込み)
 │       ├── syscall.rs             # int 0x80 システムコールハンドラ
 │       ├── elf.rs                 # ELF64ローダー (静的ET_EXECのみ)
+│       ├── pe.rs                  # PE32+ローダー (KERNEL32.DLLサブセットのサンク合成込み)
+│       ├── apk.rs                 # ZIPコンテナリーダー + AXMLヘッダー検証
 │       ├── pkg.rs                 # .mapp パッケージ形式 (build/parse/list/run)
-│       └── process.rs             # ELFロード+アドレス空間+スケジューラ登録のヘルパー
+│       └── process.rs             # ELF/PEロード+アドレス空間+スケジューラ登録のヘルパー
 ├── userland/                 # ユーザーランドテストプログラム (カーネルとは独立したcrate群)
 │   ├── init/                   # int 0x80 でSYS_WRITE→SYS_EXITを呼ぶだけの最小プログラム
 │   │   ├── Cargo.toml            # 独立ワークスペース ([workspace] 空定義でルートから分離)
@@ -150,9 +166,14 @@ moon-os/
 │   └── counter/                # ループしながら tick 0..4 を出力する2個目のテストアプリ
 │       └── (initと同じ構成)
 └── tools/
-    ├── build.sh              # userland/* → カーネルの順にビルドし、ISO作成
-                                 # (Limineは初回実行時に自動取得)
-    └── run.sh                # ISOをQEMUで起動
+    ├── build.sh              # userland/* → PE/APKテストフィクスチャ → カーネルの順にビルド
+    │                            # (Limineは初回実行時に自動取得)
+    ├── run.sh                # ISOをQEMUで起動
+    ├── pe_test/              # 手書きPE32+テストバイナリ (Windowsツールチェーン不要)
+    │   ├── section.asm         # NASMで書いたコード+インポートテーブル+文字列
+    │   └── pack_pe.py           # section.binをPE32+ヘッダーで包むPythonスクリプト
+    └── apk_test/              # 手書きテストAPK (ZIP+AXMLヘッダーのみ)
+        └── make_apk.py          # 正しいCRC32を計算してZIPを構築するPythonスクリプト
 ```
 
 ## 開発環境のセットアップ
@@ -222,10 +243,16 @@ net: ping to gateway 10.0.2.2 succeeded
 net: DNS example.com -> 104.20.23.154
 pkg: installed 2 bundled package(s) into /apps
 pkg: running init
-scheduler: 3 task(s) spawned
+pe: Win32-ish test binary loaded, entry=0x140001000
+apk: test APK has 1 entr(y/ies)
+apk:   AndroidManifest.xml (16 -> 16 bytes, method=0)
+apk: AndroidManifest.xml is valid AXML (chunk_type=0x3, header_size=8, chunk_size=16)
+scheduler: 4 task(s) spawned
 keyboard: IRQ1 unmasked
 mouse: enabled, IRQ12 unmasked
 [user] Hello from moon OS userland (ring 3)!
+syscall: user task exited with code 0
+[user] Hello from moon OS PE loader (ring 3, Win32-ish)!
 syscall: user task exited with code 0
 interrupts enabled, 100 Hz timer running, entering idle loop
 [task A] iteration 100000000
@@ -244,13 +271,18 @@ qemu-system-x86_64 -M q35 -m 256M -cdrom build/moon-os.iso \
     -serial stdio -display none -no-reboot -no-shutdown
 ```
 
-## 次の開発ステップ (M8: EXE/APK 互換レイヤー)
+## 次の開発ステップ
 
-M7 (ユーザーモード基盤 + パッケージ管理/アプリ基盤) は完了しました。ターミナルで
-`pkg list` / `pkg run <name>`、GUIのファイルマネージャー/Moon Storeからも
-`.mapp`パッケージ (`init`/`counter`) を実際にリング3プロセスとして起動できます。
+M7 (ユーザーモード基盤 + パッケージ管理/アプリ基盤) と M8 (EXE/APK互換レイヤーの
+第一歩) は完了しました。ターミナルで `pkg list` / `pkg run <name>`、GUIの
+ファイルマネージャー/Moon Storeからも `.mapp`パッケージ (`init`/`counter`) を
+実際にリング3プロセスとして起動でき、PE32+ローダーが`KERNEL32.DLL`の
+`ExitProcess`/`WriteConsoleA`サブセットを解決して実際のWin32ライクな
+テストバイナリを実行、APKコンテナリーダーが`AndroidManifest.xml`のAXML
+ヘッダーを検証できます。
 
-次は M8 (EXE/APK 互換レイヤー) — PEローダー + Win32 API サブセット、
-APKコンテナ解析からの段階的な互換レイヤー構築です。
+次のステップ候補: M9 (オーディオスタック、Webブラウザー、AIアシスタント)、
+またはEXE/APKレイヤーの拡張(対応Win32 API関数の追加、DEFLATE展開、
+AXML要素ツリー解析)。詳細は [ROADMAP.md](ROADMAP.md) を参照してください。
 
 詳細は [ROADMAP.md](ROADMAP.md) を参照してください。

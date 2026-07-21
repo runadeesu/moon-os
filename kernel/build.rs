@@ -27,4 +27,22 @@ fn main() {
         println!("cargo:rerun-if-env-changed={env_var}");
         println!("cargo:rerun-if-changed={path}");
     }
+
+    // The hand-built PE/Win32 test binary (tools/pe_test/) -- there's no
+    // Windows cross-toolchain in this environment, so tools/build.sh
+    // assembles it with NASM and wraps it in PE headers with a small
+    // Python script instead. Falls back to that same output path.
+    let pe_test_exe = std::env::var("PE_TEST_EXE")
+        .unwrap_or_else(|_| format!("{manifest_dir}/../tools/pe_test/hello_pe.exe"));
+    println!("cargo:rustc-env=PE_TEST_EXE={pe_test_exe}");
+    println!("cargo:rerun-if-env-changed=PE_TEST_EXE");
+    println!("cargo:rerun-if-changed={pe_test_exe}");
+
+    // The hand-built test APK (tools/apk_test/) -- a minimal ZIP archive
+    // with an AndroidManifest.xml entry, for kernel/src/apk.rs.
+    let apk_test_file = std::env::var("APK_TEST_FILE")
+        .unwrap_or_else(|_| format!("{manifest_dir}/../tools/apk_test/test.apk"));
+    println!("cargo:rustc-env=APK_TEST_FILE={apk_test_file}");
+    println!("cargo:rerun-if-env-changed=APK_TEST_FILE");
+    println!("cargo:rerun-if-changed={apk_test_file}");
 }

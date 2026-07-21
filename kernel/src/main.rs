@@ -7,6 +7,7 @@
 
 extern crate alloc;
 
+mod apk;
 mod arch;
 mod drivers;
 mod elf;
@@ -19,6 +20,7 @@ mod i18n;
 mod limine;
 mod memory;
 mod net;
+mod pe;
 mod pkg;
 mod process;
 mod sched;
@@ -177,6 +179,14 @@ extern "C" fn kmain() -> ! {
         Ok(name) => crate::serial_println!("pkg: running {}", name),
         Err(err) => crate::serial_println!("pkg: failed to run init.mapp: {}", err),
     }
+
+    match process::spawn_from_pe(PE_TEST_EXE) {
+        Ok(entry) => crate::serial_println!("pe: Win32-ish test binary loaded, entry={:#x}", entry),
+        Err(err) => crate::serial_println!("pe: failed to load test binary: {}", err),
+    }
+
+    inspect_apk_test_fixture();
+
     crate::serial_println!("scheduler: {} task(s) spawned", sched::task_count());
 
     arch::x86_64::pit::init(100);
@@ -208,6 +218,57 @@ extern "C" fn kmain() -> ! {
 /// use later.
 static INIT_ELF: &[u8] = include_bytes!(env!("USERLAND_INIT_ELF"));
 static COUNTER_ELF: &[u8] = include_bytes!(env!("USERLAND_COUNTER_ELF"));
+
+/// A hand-built PE32+ (Windows) test binary (`tools/pe_test/`, assembled
+/// with NASM since no Windows cross-toolchain is available here) that
+/// exercises `kernel/src/pe.rs`'s loader and `KERNEL32.DLL` import subset
+/// end to end.
+static PE_TEST_EXE: &[u8] = include_bytes!(env!("PE_TEST_EXE"));
+
+/// A hand-built test APK -- a minimal ZIP archive with an
+/// `AndroidManifest.xml` entry (`tools/apk_test/`) -- exercising
+/// `kernel/src/apk.rs`'s ZIP container reader and AXML chunk-header parser.
+/// See that module's doc comment for exactly how far "APK support" goes
+/// right now (not very far: no DEFLATE, no manifest tree decoding, and
+/// nowhere near an actual Dalvik/ART runtime).
+static APK_TEST_FILE: &[u8] = include_bytes!(env!("APK_TEST_FILE"));
+
+/// Lists the bundled test APK's ZIP contents, pulls out
+/// `AndroidManifest.xml`, and validates its AXML chunk header -- proof the
+/// container/format parsing in `apk.rs` works, not a claim that moon OS can
+/// run Android apps.
+fn inspect_apk_test_fixture() {
+    let entries = match apk::list_entries(APK_TEST_FILE) {
+        Ok(entries) => entries,
+        Err(err) => {
+            crate::serial_println!("apk: failed to read test APK: {}", err);
+            return;
+        }
+    };
+    crate::serial_println!("apk: test APK has {} entr(y/ies)", entries.len());
+    for entry in &entries {
+        crate::serial_println!(
+            "apk:   {} ({} -> {} bytes, method={})",
+            entry.name,
+            entry.compressed_size,
+            entry.uncompressed_size,
+            entry.method
+        );
+    }
+
+    match apk::find_manifest(APK_TEST_FILE) {
+        Ok(manifest_bytes) => match apk::parse_axml_header(&manifest_bytes) {
+            Ok(header) => crate::serial_println!(
+                "apk: AndroidManifest.xml is valid AXML (chunk_type={:#x}, header_size={}, chunk_size={})",
+                header.chunk_type,
+                header.header_size,
+                header.chunk_size
+            ),
+            Err(err) => crate::serial_println!("apk: AndroidManifest.xml is not valid AXML: {}", err),
+        },
+        Err(err) => crate::serial_println!("apk: failed to extract AndroidManifest.xml: {}", err),
+    }
+}
 
 /// Wraps the bundled test binaries as `.mapp` packages and writes them into
 /// RAMFS, so everything downstream (pkg::installed/run, the File Manager,
