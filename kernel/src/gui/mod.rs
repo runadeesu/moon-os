@@ -827,11 +827,11 @@ pub fn on_mouse(dx: i32, dy: i32, left: bool, right: bool, _middle: bool) {
         let (cx, cy) = (gui.cursor_x, gui.cursor_y);
 
         if gui.locked {
-            if left && !gui.left_was_down && login::button_hit(cx, cy, screen_w, screen_h) {
-                let ch = b'\n';
-                if login::handle_char(&mut gui.login, ch) {
-                    gui.locked = false;
-                }
+            if left
+                && !gui.left_was_down
+                && login::handle_click(&mut gui.login, cx, cy, screen_w, screen_h)
+            {
+                gui.locked = false;
             }
             gui.left_was_down = left;
             gui.right_was_down = right;
