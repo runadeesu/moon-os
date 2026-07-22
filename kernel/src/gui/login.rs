@@ -7,6 +7,13 @@
 //! are rejected, not waved through), and Sign Up genuinely creates a new
 //! account you can then log into (rejecting a name that's already taken),
 //! not a form that just pretends to register you.
+//!
+//! Day-to-day Log In only asks for a password -- the account you're
+//! unlocking is shown as a fixed label, the way a real desktop OS's lock
+//! screen greets "Welcome back, <user>" rather than making you re-type your
+//! own name every time. Typing a *different* account still works via the
+//! "Switch user" link, which is the only place the username field becomes
+//! editable outside of Sign Up.
 
 use crate::framebuffer;
 use alloc::format;
@@ -75,36 +82,63 @@ fn create_account(username: &str, password: &str) -> Result<(), &'static str> {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Field {
-    Username,
-    Password,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
+    /// Password-only: `current_user` is a fixed label, only `password` is
+    /// editable.
     LogIn,
+    /// Both fields editable, for logging in as an account other than
+    /// `current_user`.
+    SwitchUser,
+    /// Both fields editable, creates a new account.
     SignUp,
 }
 
 pub struct LoginState {
+    /// The account the password-only Log In screen greets and unlocks.
+    /// Updated on every successful login/registration, but never persisted
+    /// to disk -- RAMFS itself doesn't survive a reboot, so remembering it
+    /// only within the running session is the honest scope here.
+    current_user: String,
+    /// Editable username input, used only in SwitchUser/SignUp mode.
     username: String,
     password: String,
-    focus: Field,
+    username_focused: bool,
     mode: Mode,
     error: Option<String>,
-    info: Option<String>,
 }
 
 impl LoginState {
     pub const fn new() -> Self {
         Self {
+            // Empty means "not yet set" -- `display_user()` falls back to
+            // DEFAULT_USER. Can't call `String::from` here: this runs in a
+            // static initializer, which only allows genuinely const calls.
+            current_user: String::new(),
             username: String::new(),
             password: String::new(),
-            focus: Field::Username,
+            username_focused: false,
             mode: Mode::LogIn,
             error: None,
-            info: None,
         }
+    }
+
+    fn display_user(&self) -> &str {
+        if self.current_user.is_empty() {
+            DEFAULT_USER
+        } else {
+            &self.current_user
+        }
+    }
+
+    /// Resets the screen for a fresh lock/unlock cycle -- clears whatever
+    /// was typed and drops back to password-only Log In, but keeps
+    /// remembering which account was last active.
+    pub fn lock(&mut self) {
+        self.username.clear();
+        self.password.clear();
+        self.username_focused = false;
+        self.mode = Mode::LogIn;
+        self.error = None;
     }
 }
 
@@ -120,25 +154,25 @@ impl Default for LoginState {
 /// in, the same way a real OS's "create account" flow lands you on the
 /// desktop rather than bouncing you back to a login prompt).
 pub fn handle_char(state: &mut LoginState, ch: u8) -> bool {
+    let username_editable = state.mode != Mode::LogIn;
     match ch {
-        b'\t' => {
-            state.focus = match state.focus {
-                Field::Username => Field::Password,
-                Field::Password => Field::Username,
-            };
+        b'\t' if username_editable => {
+            state.username_focused = !state.username_focused;
         }
         b'\n' => return submit(state),
         0x08 => {
-            match state.focus {
-                Field::Username => state.username.pop(),
-                Field::Password => state.password.pop(),
-            };
+            if username_editable && state.username_focused {
+                state.username.pop();
+            } else {
+                state.password.pop();
+            }
         }
         0x20..=0x7E => {
-            match state.focus {
-                Field::Username => state.username.push(ch as char),
-                Field::Password => state.password.push(ch as char),
-            };
+            if username_editable && state.username_focused {
+                state.username.push(ch as char);
+            } else {
+                state.password.push(ch as char);
+            }
         }
         _ => {}
     }
@@ -148,20 +182,39 @@ pub fn handle_char(state: &mut LoginState, ch: u8) -> bool {
 fn submit(state: &mut LoginState) -> bool {
     match state.mode {
         Mode::LogIn => {
+            let user = state.display_user().to_string();
+            let ok = check_login(&user, &state.password);
+            state.password.clear();
+            if ok {
+                state.error = None;
+                true
+            } else {
+                state.error = Some(String::from("incorrect password"));
+                false
+            }
+        }
+        Mode::SwitchUser => {
             let ok = check_login(&state.username, &state.password);
             if ok {
+                state.current_user = state.username.clone();
+                state.username.clear();
                 state.password.clear();
                 state.error = None;
-                return true;
+                state.mode = Mode::LogIn;
+                true
+            } else {
+                state.password.clear();
+                state.error = Some(String::from("incorrect username or password"));
+                false
             }
-            state.password.clear();
-            state.error = Some(String::from("incorrect username or password"));
-            false
         }
         Mode::SignUp => match create_account(&state.username, &state.password) {
             Ok(()) => {
+                state.current_user = state.username.clone();
+                state.username.clear();
                 state.password.clear();
                 state.error = None;
+                state.mode = Mode::LogIn;
                 true
             }
             Err(msg) => {
@@ -172,20 +225,32 @@ fn submit(state: &mut LoginState) -> bool {
     }
 }
 
-/// Switches between Log In and Sign Up -- called from the toggle link's
-/// click handler.
-fn toggle_mode(state: &mut LoginState) {
-    state.mode = match state.mode {
-        Mode::LogIn => Mode::SignUp,
-        Mode::SignUp => Mode::LogIn,
-    };
-    state.error = None;
-    state.info = None;
+fn enter_switch_user(state: &mut LoginState) {
+    state.mode = Mode::SwitchUser;
+    state.username.clear();
     state.password.clear();
+    state.username_focused = true;
+    state.error = None;
+}
+
+fn enter_sign_up(state: &mut LoginState) {
+    state.mode = Mode::SignUp;
+    state.username.clear();
+    state.password.clear();
+    state.username_focused = true;
+    state.error = None;
+}
+
+fn cancel_to_login(state: &mut LoginState) {
+    state.mode = Mode::LogIn;
+    state.username.clear();
+    state.password.clear();
+    state.username_focused = false;
+    state.error = None;
 }
 
 const CARD_W: i32 = 320;
-const CARD_H: i32 = 260;
+const CARD_H: i32 = 280;
 const BUTTON_W: i32 = 120;
 const BUTTON_H: i32 = 24;
 const FIELD_H: i32 = 20;
@@ -212,9 +277,14 @@ fn button_rect(screen_w: usize, screen_h: usize) -> (i32, i32, i32, i32) {
     (cx + (CARD_W - BUTTON_W) / 2, cy + 158, BUTTON_W, BUTTON_H)
 }
 
-fn toggle_link_rect(screen_w: usize, screen_h: usize) -> (i32, i32, i32, i32) {
+fn primary_link_rect(screen_w: usize, screen_h: usize) -> (i32, i32, i32, i32) {
     let (cx, cy) = card_rect(screen_w, screen_h);
     (cx + 20, cy + 198, CARD_W - 40, 14)
+}
+
+fn secondary_link_rect(screen_w: usize, screen_h: usize) -> (i32, i32, i32, i32) {
+    let (cx, cy) = card_rect(screen_w, screen_h);
+    (cx + 20, cy + 216, CARD_W - 40, 14)
 }
 
 fn point_in(rect: (i32, i32, i32, i32), x: i32, y: i32) -> bool {
@@ -231,14 +301,24 @@ pub fn handle_click(
     screen_w: usize,
     screen_h: usize,
 ) -> bool {
-    if point_in(username_field_rect(screen_w, screen_h), x, y) {
-        state.focus = Field::Username;
+    let username_editable = state.mode != Mode::LogIn;
+    if username_editable && point_in(username_field_rect(screen_w, screen_h), x, y) {
+        state.username_focused = true;
     } else if point_in(password_field_rect(screen_w, screen_h), x, y) {
-        state.focus = Field::Password;
+        state.username_focused = false;
     } else if point_in(button_rect(screen_w, screen_h), x, y) {
         return submit(state);
-    } else if point_in(toggle_link_rect(screen_w, screen_h), x, y) {
-        toggle_mode(state);
+    } else if point_in(primary_link_rect(screen_w, screen_h), x, y) {
+        match state.mode {
+            Mode::LogIn => enter_switch_user(state),
+            Mode::SwitchUser => enter_sign_up(state),
+            Mode::SignUp => cancel_to_login(state),
+        }
+    } else if point_in(secondary_link_rect(screen_w, screen_h), x, y) {
+        match state.mode {
+            Mode::LogIn => enter_sign_up(state),
+            Mode::SwitchUser | Mode::SignUp => cancel_to_login(state),
+        }
     }
     false
 }
@@ -246,6 +326,7 @@ pub fn handle_click(
 pub fn render(screen_w: usize, screen_h: usize, state: &LoginState) {
     let neon = super::theme::accent();
     let (cx, cy) = card_rect(screen_w, screen_h);
+    let username_editable = state.mode != Mode::LogIn;
 
     framebuffer::with(|c| {
         // A dark scrim over whatever's behind (the animated wallpaper),
@@ -275,6 +356,7 @@ pub fn render(screen_w: usize, screen_h: usize, state: &LoginState) {
 
         let title = match state.mode {
             Mode::LogIn => "moon OS",
+            Mode::SwitchUser => "Switch User",
             Mode::SignUp => "Create Account",
         };
         c.draw_str_at(
@@ -285,22 +367,33 @@ pub fn render(screen_w: usize, screen_h: usize, state: &LoginState) {
             None,
         );
 
-        let label = "username:";
-        c.draw_str_at(cx + 20, cy + 82, label, (0x90, 0x94, 0xA0), None);
-        let (ux, uy, uw, uh) = username_field_rect(screen_w, screen_h);
-        c.fill_rect(ux, uy, uw as u32, uh as u32, (0x08, 0x0A, 0x12));
-        c.glow_border(
-            ux,
-            uy,
-            uw as u32,
-            uh as u32,
-            if state.focus == Field::Username {
-                neon
-            } else {
-                (0x40, 0x44, 0x50)
-            },
-        );
-        c.draw_str_at(ux + 6, uy + 6, &state.username, (0xE0, 0xE0, 0xE0), None);
+        if username_editable {
+            let label = "username:";
+            c.draw_str_at(cx + 20, cy + 82, label, (0x90, 0x94, 0xA0), None);
+            let (ux, uy, uw, uh) = username_field_rect(screen_w, screen_h);
+            c.fill_rect(ux, uy, uw as u32, uh as u32, (0x08, 0x0A, 0x12));
+            c.glow_border(
+                ux,
+                uy,
+                uw as u32,
+                uh as u32,
+                if state.username_focused {
+                    neon
+                } else {
+                    (0x40, 0x44, 0x50)
+                },
+            );
+            c.draw_str_at(ux + 6, uy + 6, &state.username, (0xE0, 0xE0, 0xE0), None);
+        } else {
+            let label = format!("Welcome back, {}", state.display_user());
+            c.draw_str_at(
+                cx + (CARD_W - label.len() as i32 * 8).max(0) / 2,
+                cy + 90,
+                &label,
+                (0x90, 0xB0, 0xD0),
+                None,
+            );
+        }
 
         let (px, py, pw, ph) = password_field_rect(screen_w, screen_h);
         c.fill_rect(px, py, pw as u32, ph as u32, (0x08, 0x0A, 0x12));
@@ -309,7 +402,7 @@ pub fn render(screen_w: usize, screen_h: usize, state: &LoginState) {
             py,
             pw as u32,
             ph as u32,
-            if state.focus == Field::Password {
+            if !username_editable || !state.username_focused {
                 neon
             } else {
                 (0x40, 0x44, 0x50)
@@ -328,7 +421,8 @@ pub fn render(screen_w: usize, screen_h: usize, state: &LoginState) {
             );
         } else {
             let hint = match state.mode {
-                Mode::LogIn => format!("hint: default is {DEFAULT_USER} / \"{DEFAULT_PASS}\""),
+                Mode::LogIn => format!("hint: default password is \"{DEFAULT_PASS}\""),
+                Mode::SwitchUser => String::from("enter another account's username and password"),
                 Mode::SignUp => String::from("pick a username and password"),
             };
             c.draw_str_at(
@@ -344,7 +438,7 @@ pub fn render(screen_w: usize, screen_h: usize, state: &LoginState) {
         c.fill_rect(bx, by, bw as u32, bh as u32, (0x12, 0x28, 0x36));
         c.glow_border(bx, by, bw as u32, bh as u32, neon);
         let btn_label = match state.mode {
-            Mode::LogIn => "Log In",
+            Mode::LogIn | Mode::SwitchUser => "Log In",
             Mode::SignUp => "Create Account",
         };
         c.draw_str_at(
@@ -355,16 +449,32 @@ pub fn render(screen_w: usize, screen_h: usize, state: &LoginState) {
             None,
         );
 
-        let toggle_label = match state.mode {
-            Mode::LogIn => "New here? Sign Up",
+        let primary_label = match state.mode {
+            Mode::LogIn => "Switch user",
+            Mode::SwitchUser => "Sign Up instead",
             Mode::SignUp => "Have an account? Log In",
         };
         c.draw_str_at(
-            cx + (CARD_W - toggle_label.len() as i32 * 8) / 2,
+            cx + (CARD_W - primary_label.len() as i32 * 8) / 2,
             cy + 200,
-            toggle_label,
+            primary_label,
             (0x80, 0xC0, 0xE0),
             None,
         );
+
+        let secondary_label = match state.mode {
+            Mode::LogIn => "New here? Sign Up",
+            Mode::SwitchUser => "Cancel",
+            Mode::SignUp => "",
+        };
+        if !secondary_label.is_empty() {
+            c.draw_str_at(
+                cx + (CARD_W - secondary_label.len() as i32 * 8) / 2,
+                cy + 218,
+                secondary_label,
+                (0x80, 0xC0, 0xE0),
+                None,
+            );
+        }
     });
 }
