@@ -11,6 +11,28 @@
 
 use crate::framebuffer;
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicUsize, Ordering};
+
+/// Wallpaper choices: all procedurally generated (there's no image/PNG
+/// decoder in this kernel, so "wallpaper" means a different generator, not
+/// a different photo) but genuinely distinct scenes, still driven by the
+/// real RTC-based day/night cycle rather than becoming static.
+pub const STYLE_NAMES: [&str; 3] = ["Space", "Aurora", "Minimal"];
+static STYLE: AtomicUsize = AtomicUsize::new(0);
+
+pub fn style_name() -> &'static str {
+    STYLE_NAMES[STYLE.load(Ordering::Relaxed) % STYLE_NAMES.len()]
+}
+
+/// Cycles to the next wallpaper style -- called from the desktop's
+/// right-click "Change Wallpaper" menu item.
+pub fn cycle_style() {
+    STYLE
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |s| {
+            Some((s + 1) % STYLE_NAMES.len())
+        })
+        .ok();
+}
 
 pub struct Star {
     x: i32,
@@ -114,11 +136,28 @@ pub fn render(stars: &[Star], screen_w: usize, screen_h: usize, ticks: u64) {
     let dt = crate::drivers::rtc::read();
     let minute_of_day = i32::from(dt.hour) * 60 + i32::from(dt.minute);
     let night = night_factor(minute_of_day); // 0 (day) .. 256 (night)
+    let style = STYLE.load(Ordering::Relaxed) % STYLE_NAMES.len();
 
-    let night_top = (0x05, 0x06, 0x12);
-    let night_bottom = (0x1E, 0x2A, 0x46);
-    let day_top = (0x2E, 0x6E, 0xC8);
-    let day_bottom = (0x9E, 0xD4, 0xF0);
+    let (day_top, day_bottom, night_top, night_bottom) = match style {
+        1 => (
+            (0x2E, 0x50, 0x60),
+            (0x30, 0x90, 0x78),
+            (0x08, 0x08, 0x16),
+            (0x10, 0x2E, 0x2A),
+        ),
+        2 => (
+            (0x30, 0x38, 0x50),
+            (0x50, 0x58, 0x70),
+            (0x08, 0x08, 0x10),
+            (0x18, 0x1A, 0x26),
+        ),
+        _ => (
+            (0x2E, 0x6E, 0xC8),
+            (0x9E, 0xD4, 0xF0),
+            (0x05, 0x06, 0x12),
+            (0x1E, 0x2A, 0x46),
+        ),
+    };
     let top = lerp_rgb(day_top, night_top, night, 256);
     let bottom = lerp_rgb(day_bottom, night_bottom, night, 256);
 
@@ -128,6 +167,25 @@ pub fn render(stars: &[Star], screen_w: usize, screen_h: usize, ticks: u64) {
             c.fill_rect(0, y, screen_w as u32, 1, color);
         }
     });
+
+    if style == 1 {
+        // Aurora bands: a few overlapping translucent horizontal waves that
+        // drift sideways, standing in for the mountains/clouds layers below.
+        framebuffer::with(|c| {
+            for band in 0..3 {
+                let color = match band {
+                    0 => (0x40, 0xE0, 0xA0),
+                    1 => (0x60, 0x80, 0xE0),
+                    _ => (0xA0, 0x50, 0xE0),
+                };
+                for x in 0..sw {
+                    let wave = ridge_height(x, (ticks / 6) as i32 + band * 200, 260, 40);
+                    let y = sh / 4 + band * 30 + wave - 20;
+                    c.blend_rect(x, y, 1, 3, color, 90);
+                }
+            }
+        });
+    }
 
     // The sun/moon sweeps left-to-right across the sky over its half of the
     // day (sun: roughly 6:00-18:00, moon: 18:00-6:00) rather than sitting
@@ -185,7 +243,7 @@ pub fn render(stars: &[Star], screen_w: usize, screen_h: usize, ticks: u64) {
         }
     });
 
-    if night > 40 {
+    if night > 40 && style != 2 {
         let star_alpha = ((night - 40) * 255 / 216).clamp(0, 255) as u8;
         framebuffer::with(|c| {
             for star in stars {
@@ -201,41 +259,45 @@ pub fn render(stars: &[Star], screen_w: usize, screen_h: usize, ticks: u64) {
         });
     }
 
-    // Drifting clouds: slow horizontal parallax, two layers at different
-    // speeds/heights/scales, wrapping around the screen width.
-    let cloud_color = lerp_rgb((0xF0, 0xF0, 0xF5), (0x30, 0x38, 0x48), night, 256);
-    framebuffer::with(|c| {
-        for i in 0..4 {
-            let speed = 6 + i * 3; // pixels per 100 ticks-ish, via the modulo below
-            let base_x = (sw / 4) * i;
-            let drift = ((ticks / 4) as i32 * speed / 10) % (sw + 200);
-            let x = (base_x + drift).rem_euclid(sw + 200) - 100;
-            let y = sh / 12 + (i % 2) * sh / 14;
-            draw_cloud(c, x, y, 14 + (i % 2) * 6, cloud_color);
-        }
-    });
+    if style == 0 {
+        // Drifting clouds: slow horizontal parallax, two layers at different
+        // speeds/heights/scales, wrapping around the screen width.
+        let cloud_color = lerp_rgb((0xF0, 0xF0, 0xF5), (0x30, 0x38, 0x48), night, 256);
+        framebuffer::with(|c| {
+            for i in 0..4 {
+                let speed = 6 + i * 3; // pixels per 100 ticks-ish, via the modulo below
+                let base_x = (sw / 4) * i;
+                let drift = ((ticks / 4) as i32 * speed / 10) % (sw + 200);
+                let x = (base_x + drift).rem_euclid(sw + 200) - 100;
+                let y = sh / 12 + (i % 2) * sh / 14;
+                draw_cloud(c, x, y, 14 + (i % 2) * 6, cloud_color);
+            }
+        });
 
-    // Two layers of mountains, far (lighter, taller) then near (darker),
-    // each a per-column vertical fill up from the deterministic ridge line.
-    framebuffer::with(|c| {
-        for x in 0..sw {
-            let h = 60 + ridge_height(x, sw / 3, 320, 90);
-            c.fill_rect(x, sh - h, 1, h as u32, (0x14, 0x18, 0x28));
-        }
-        for x in 0..sw {
-            let h = 30 + ridge_height(x, sw / 7, 180, 60);
-            c.fill_rect(x, sh - h, 1, h as u32, (0x08, 0x0A, 0x14));
-        }
-    });
+        // Two layers of mountains, far (lighter, taller) then near (darker),
+        // each a per-column vertical fill up from the deterministic ridge line.
+        framebuffer::with(|c| {
+            for x in 0..sw {
+                let h = 60 + ridge_height(x, sw / 3, 320, 90);
+                c.fill_rect(x, sh - h, 1, h as u32, (0x14, 0x18, 0x28));
+            }
+            for x in 0..sw {
+                let h = 30 + ridge_height(x, sw / 7, 180, 60);
+                c.fill_rect(x, sh - h, 1, h as u32, (0x08, 0x0A, 0x14));
+            }
+        });
+    }
 
-    // A faint cyan scanline pattern over everything -- a cheap, very subtle
-    // CRT/HUD texture that reads as "futuristic" without repainting the
-    // whole scene at a different color.
-    framebuffer::with(|c| {
-        let mut sy = 0;
-        while sy < sh {
-            c.blend_rect(0, sy, screen_w as u32, 1, (0x40, 0xE0, 0xFF), 10);
-            sy += 3;
-        }
-    });
+    if style != 2 {
+        // A faint cyan scanline pattern over everything -- a cheap, very
+        // subtle CRT/HUD texture. Left out of the Minimal style, which is
+        // meant to read as clean and flat.
+        framebuffer::with(|c| {
+            let mut sy = 0;
+            while sy < sh {
+                c.blend_rect(0, sy, screen_w as u32, 1, (0x40, 0xE0, 0xFF), 10);
+                sy += 3;
+            }
+        });
+    }
 }

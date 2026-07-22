@@ -19,7 +19,7 @@ const LIST_TOP: i32 = HEADER_H + TOOLBAR_H;
 /// row need to land to count as a double-click.
 const DOUBLE_CLICK_TICKS: u64 = 40;
 
-const TRASH_DIR: &str = "/.Trash";
+pub const TRASH_DIR: &str = "/.Trash";
 
 const ACTION_RENAME: u32 = 0;
 const ACTION_DELETE: u32 = 1;

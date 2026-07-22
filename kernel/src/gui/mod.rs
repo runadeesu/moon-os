@@ -20,6 +20,7 @@
 
 mod cursor;
 mod desktop;
+pub mod desktop_icons;
 pub mod desktop_widgets;
 pub mod notifications;
 pub mod taskbar;
@@ -305,6 +306,10 @@ struct GuiState {
     info_popup: Option<ContextMenu>,
     /// The user-icon's power menu (Reboot/Shutdown).
     user_menu: Option<ContextMenu>,
+    /// The desktop's own right-click menu (New Folder / Change Wallpaper),
+    /// separate from a window's right-click menu.
+    desktop_menu: Option<ContextMenu>,
+    desktop_last_click: Option<(desktop_icons::DesktopIcon, u64)>,
     notif_panel_open: bool,
     search_active: bool,
     search_query: String,
@@ -328,6 +333,8 @@ impl GuiState {
             moon_menu: None,
             info_popup: None,
             user_menu: None,
+            desktop_menu: None,
+            desktop_last_click: None,
             notif_panel_open: false,
             search_active: false,
             search_query: String::new(),
@@ -537,42 +544,47 @@ fn activate_search_hit(gui: &mut GuiState, screen_w: usize, screen_h: usize, ind
     if let Some(hit) = gui.search_results.get(index) {
         match hit {
             SearchHit::App(kind) => gui.open_app(*kind, screen_w, screen_h),
-            SearchHit::File(path) => {
-                let dir = parent_dir(path);
-                if let Some(idx) = gui
-                    .windows
-                    .iter()
-                    .position(|w| w.title == AppKind::Files.dock_title())
-                {
-                    let mut w = gui.windows.remove(idx);
-                    w.minimized = false;
-                    w.content = WindowContent::Files(FileManagerState::new_at(dir));
-                    gui.windows.push(w);
-                } else {
-                    let (ax, ay, _, _) = content_area(screen_w, screen_h);
-                    let id = gui.next_id;
-                    gui.next_id += 1;
-                    let (w, h) = AppKind::Files.default_size();
-                    gui.windows.push(Window {
-                        id,
-                        x: ax,
-                        y: ay,
-                        w,
-                        h,
-                        title: String::from(AppKind::Files.dock_title()),
-                        content: WindowContent::Files(FileManagerState::new_at(dir)),
-                        minimized: false,
-                        maximized: None,
-                        opened_at: crate::sched::ticks(),
-                        closing_since: None,
-                    });
-                }
-            }
+            SearchHit::File(path) => open_files_at(gui, screen_w, screen_h, parent_dir(path)),
         }
     }
     gui.search_active = false;
     gui.search_query.clear();
     gui.search_results.clear();
+}
+
+/// Focuses the existing File Manager window (navigating it to `dir`) or
+/// spawns a new one already there. Shared by the search box's "jump to this
+/// file's folder" result and the desktop's Home/Downloads/Documents/
+/// Pictures/Music/Trash icons.
+fn open_files_at(gui: &mut GuiState, screen_w: usize, screen_h: usize, dir: String) {
+    if let Some(idx) = gui
+        .windows
+        .iter()
+        .position(|w| w.title == AppKind::Files.dock_title())
+    {
+        let mut w = gui.windows.remove(idx);
+        w.minimized = false;
+        w.content = WindowContent::Files(FileManagerState::new_at(dir));
+        gui.windows.push(w);
+    } else {
+        let (ax, ay, _, _) = content_area(screen_w, screen_h);
+        let id = gui.next_id;
+        gui.next_id += 1;
+        let (w, h) = AppKind::Files.default_size();
+        gui.windows.push(Window {
+            id,
+            x: ax,
+            y: ay,
+            w,
+            h,
+            title: String::from(AppKind::Files.dock_title()),
+            content: WindowContent::Files(FileManagerState::new_at(dir)),
+            minimized: false,
+            maximized: None,
+            opened_at: crate::sched::ticks(),
+            closing_since: None,
+        });
+    }
 }
 
 /// Opens/focuses whatever `request_open` queued while handling that
@@ -727,6 +739,78 @@ pub fn on_mouse(dx: i32, dy: i32, left: bool, right: bool, _middle: bool) {
                 drop(gui);
                 redraw();
                 return;
+            }
+            if let Some(menu) = gui.desktop_menu.take() {
+                let row = (cy - menu.y) / MENU_ROW_H;
+                if cx >= menu.x
+                    && cx < menu.x + MENU_W
+                    && row >= 0
+                    && (row as usize) < menu.items.len()
+                {
+                    match menu.items[row as usize].1 {
+                        0 => {
+                            let mut root = crate::fs::root().lock();
+                            let mut n = 1u32;
+                            loop {
+                                let path =
+                                    alloc::format!("{}/New Folder {}", desktop_icons::HOME_DIR, n);
+                                if !root.exists(&path) {
+                                    root.mkdir(&path);
+                                    break;
+                                }
+                                n += 1;
+                            }
+                        }
+                        1 => desktop::cycle_style(),
+                        _ => {}
+                    }
+                }
+                gui.left_was_down = left;
+                gui.right_was_down = right;
+                drop(gui);
+                redraw();
+                return;
+            }
+        }
+
+        // Desktop icons (Home/Downloads/.../Trash, app shortcuts) and the
+        // desktop's own right-click menu, both only reachable on the bare
+        // desktop background -- not over the taskbar or any window.
+        let over_desktop =
+            !taskbar::bar_contains(cx, cy, screen_h) && hit_test(&gui.windows, cx, cy).is_none();
+
+        if right && !gui.right_was_down && over_desktop && desktop_icons::icon_at(cx, cy).is_none()
+        {
+            gui.desktop_menu = Some(ContextMenu {
+                x: cx,
+                y: cy,
+                items: alloc::vec![
+                    (String::from("New Folder"), 0),
+                    (alloc::format!("Wallpaper: {}", desktop::style_name()), 1),
+                ],
+            });
+        }
+
+        if left && !gui.left_was_down && over_desktop {
+            gui.desktop_menu = None;
+            if let Some(icon) = desktop_icons::icon_at(cx, cy) {
+                let is_double = gui
+                    .desktop_last_click
+                    .is_some_and(|(last, t)| last == icon && now.saturating_sub(t) < 40);
+                gui.desktop_last_click = Some((icon, now));
+                if is_double {
+                    match icon.target_dir() {
+                        Some(dir) => open_files_at(&mut gui, screen_w, screen_h, String::from(dir)),
+                        None => {
+                            let kind = if icon == desktop_icons::DesktopIcon::TerminalShortcut {
+                                AppKind::Terminal
+                            } else {
+                                AppKind::Store
+                            };
+                            gui.open_app(kind, screen_w, screen_h);
+                        }
+                    }
+                }
             }
         }
 
@@ -989,6 +1073,7 @@ pub fn redraw() {
     let now = crate::sched::ticks();
 
     desktop::render(&gui.stars, screen_w, screen_h, now);
+    desktop_icons::render();
     desktop_widgets::render(screen_w as i32 - desktop_widgets::PANEL_W as i32 - 16, 16);
 
     let focused_id = gui
@@ -1063,6 +1148,9 @@ pub fn redraw() {
         render_context_menu(menu);
     }
     if let Some(menu) = &gui.info_popup {
+        render_context_menu(menu);
+    }
+    if let Some(menu) = &gui.desktop_menu {
         render_context_menu(menu);
     }
 

@@ -192,6 +192,7 @@ extern "C" fn kmain() -> ! {
     sched::spawn(task_a);
     sched::spawn(task_b);
 
+    create_home_directories();
     install_bundled_packages();
     match pkg::run("/apps/init.mapp") {
         Ok(name) => crate::serial_println!("pkg: running {}", name),
@@ -292,6 +293,24 @@ fn inspect_apk_test_fixture() {
 /// RAMFS, so everything downstream (pkg::installed/run, the File Manager,
 /// Moon Store) operates on real files through the real package format
 /// rather than special-cased embedded bytes.
+/// Creates the Home/Downloads/Documents/Pictures/Music folders the
+/// desktop's Home/Downloads/Documents/Pictures/Music icons open -- real
+/// RAMFS directories from boot, not conjured up only when an icon is
+/// clicked.
+fn create_home_directories() {
+    use gui::desktop_icons::{DOCUMENTS_DIR, DOWNLOADS_DIR, HOME_DIR, MUSIC_DIR, PICTURES_DIR};
+    let mut root = fs::root().lock();
+    for dir in [
+        HOME_DIR,
+        DOWNLOADS_DIR,
+        DOCUMENTS_DIR,
+        PICTURES_DIR,
+        MUSIC_DIR,
+    ] {
+        root.mkdir(dir);
+    }
+}
+
 fn install_bundled_packages() {
     let mut root = fs::root().lock();
     root.write("/apps/init.mapp", &pkg::build("init", "0.1.0", INIT_ELF));
