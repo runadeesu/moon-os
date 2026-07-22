@@ -194,6 +194,7 @@ extern "C" fn kmain() -> ! {
     sched::spawn(task_b);
 
     create_home_directories();
+    gui::login::ensure_default_account();
     install_bundled_packages();
     match pkg::run("/apps/init.mapp") {
         Ok(name) => crate::serial_println!("pkg: running {}", name),

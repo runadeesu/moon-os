@@ -22,6 +22,7 @@ mod cursor;
 mod desktop;
 pub mod desktop_icons;
 pub mod desktop_widgets;
+pub mod login;
 pub mod notifications;
 pub mod taskbar;
 pub mod theme;
@@ -323,6 +324,12 @@ struct GuiState {
     search_active: bool,
     search_query: String,
     search_results: Vec<SearchHit>,
+    /// Gates every other input path while `true` -- only the login card's
+    /// password field and its Log In button respond. Starts locked so the
+    /// desktop never shows before a real credential check, and can be
+    /// re-armed at runtime via the taskbar user menu's "Lock".
+    locked: bool,
+    login: login::LoginState,
 }
 
 impl GuiState {
@@ -355,6 +362,8 @@ impl GuiState {
             search_active: false,
             search_query: String::new(),
             search_results: Vec::new(),
+            locked: true,
+            login: login::LoginState::new(),
         }
     }
 
@@ -622,6 +631,14 @@ pub fn on_key(ch: u8) {
     let (screen_w, screen_h) = screen_size();
     {
         let mut gui = GUI.lock();
+        if gui.locked {
+            if login::handle_char(&mut gui.login, ch) {
+                gui.locked = false;
+            }
+            drop(gui);
+            redraw();
+            return;
+        }
         if gui.search_active {
             match ch {
                 b'\n' | b'\r' => {
@@ -724,6 +741,11 @@ fn drain_pending_opens() {
 pub fn on_special_key(key: SpecialKey) {
     {
         let mut gui = GUI.lock();
+        if gui.locked {
+            drop(gui);
+            redraw();
+            return;
+        }
         if key == SpecialKey::AltTab {
             if gui.windows.len() > 1 {
                 if let Some(w) = gui.windows.pop() {
@@ -804,6 +826,20 @@ pub fn on_mouse(dx: i32, dy: i32, left: bool, right: bool, _middle: bool) {
         gui.cursor_y = (gui.cursor_y - dy).clamp(0, screen_h as i32 - 1);
         let (cx, cy) = (gui.cursor_x, gui.cursor_y);
 
+        if gui.locked {
+            if left && !gui.left_was_down && login::button_hit(cx, cy, screen_w, screen_h) {
+                let ch = b'\n';
+                if login::handle_char(&mut gui.login, ch) {
+                    gui.locked = false;
+                }
+            }
+            gui.left_was_down = left;
+            gui.right_was_down = right;
+            drop(gui);
+            redraw();
+            return;
+        }
+
         // A context menu, if open, captures the next click entirely --
         // either it selects an item, or the click just dismisses it.
         if left && !gui.left_was_down {
@@ -867,6 +903,10 @@ pub fn on_mouse(dx: i32, dy: i32, left: bool, right: bool, _middle: bool) {
                     match menu.items[row as usize].1 {
                         0 => crate::power::reboot(),
                         1 => crate::power::shutdown(),
+                        2 => {
+                            gui.locked = true;
+                            gui.login = login::LoginState::new();
+                        }
                         _ => {}
                     }
                 }
@@ -1037,8 +1077,9 @@ pub fn on_mouse(dx: i32, dy: i32, left: bool, right: bool, _middle: bool) {
                     taskbar::TrayHit::User => {
                         gui.user_menu = Some(ContextMenu {
                             x: screen_w as i32 - 140,
-                            y: taskbar::bar_top(screen_h) - 2 * MENU_ROW_H,
+                            y: taskbar::bar_top(screen_h) - 3 * MENU_ROW_H,
                             items: alloc::vec![
+                                (String::from("Lock"), 2),
                                 (String::from("Reboot"), 0),
                                 (String::from("Shutdown"), 1),
                             ],
@@ -1265,6 +1306,20 @@ pub fn redraw() {
     let gui = GUI.lock();
     let (screen_w, screen_h) = screen_size();
     let now = crate::sched::ticks();
+
+    // The login/lock screen replaces the entire desktop -- the animated
+    // wallpaper still plays behind it (so the OS still reads as "alive"
+    // while locked), but no window, taskbar, or desktop-icon content ever
+    // renders (or receives input, see on_key/on_mouse) until unlocked.
+    if gui.locked {
+        desktop::render(&gui.stars, screen_w, screen_h, now);
+        login::render(screen_w, screen_h, &gui.login);
+        framebuffer::with(|c| {
+            cursor::draw(c, gui.cursor_x, gui.cursor_y, true);
+            c.present();
+        });
+        return;
+    }
 
     desktop::render(&gui.stars, screen_w, screen_h, now);
     desktop_icons::render();
