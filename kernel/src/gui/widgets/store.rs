@@ -1,24 +1,28 @@
-//! Moon Store: a local catalog of installed `.mapp` packages with search, a
-//! category filter, a real description/category per package, and
-//! Launch/Uninstall actions that actually run or remove the package.
+//! Moon Store: a local catalog of installed `.mapp` packages *and*
+//! installed Android packages (`crate::androidpkg`), with search, a
+//! category filter, a real description/category per entry, and
+//! Launch/Uninstall actions that actually run (or, for Android packages,
+//! honestly refuse to run) or remove the package.
 //!
 //! Honest limitations, unchanged from before: there's no networked package
 //! repository, so "the store" and "what's installed" are still the same
-//! list -- installing something new means dropping a `.mapp` into RAMFS
-//! (currently only the two bundled packages exist). That also means there's
-//! deliberately no download-progress bar: a real one would have nothing to
-//! measure (installs are an instant RAMFS write), and a fake one would be
-//! exactly the kind of dummy UI this project avoids -- see `net::http` /
-//! the Browser app for where real, slow, over-the-wire progress would
-//! actually belong once package downloads exist. Star ratings, review
-//! counts, and a "featured/ranking" section are deliberately not here for
-//! the same reason: with no real users submitting reviews, faking those
-//! numbers would be dummy data. Screenshots/icons are text-only (name +
-//! category) since there's no real image asset pipeline to draw from yet.
+//! list -- installing something new means dropping a `.mapp`/`.exe`/`.apk`
+//! into RAMFS via the File Manager (which is exactly how the bundled
+//! packages and the Android metadata registry get populated). That also
+//! means there's deliberately no download-progress bar, star ratings, or
+//! review counts -- see `net::http`/the Browser app for where real,
+//! over-the-wire progress would actually belong once package downloads
+//! exist, and there are no real users submitting reviews to fake numbers
+//! for. Screenshots/icons are text-only since there's no real image asset
+//! pipeline. Android entries are listed and launchable-in-theory the same
+//! as `.mapp` ones, but "Launch" on one always reports the truth: no
+//! Dalvik/ART interpreter, no Android framework, so its code cannot
+//! actually run here -- see `androidpkg.rs`'s doc comment.
 
 use crate::framebuffer;
 use alloc::format;
-use alloc::string::String;
+use alloc::string::{String, ToString};
+use alloc::vec::Vec;
 use core::cell::Cell;
 
 const ROW_H: i32 = 34;
@@ -45,6 +49,55 @@ fn describe(name: &str) -> (&'static str, &'static str) {
             "Counts 0..4 in a second ring-3 process, proving multi-process spawn.",
         ),
         _ => ("App", "No description available."),
+    }
+}
+
+/// One catalog row: either a real `.mapp` package or a real (metadata-only)
+/// installed Android package. Unifies the two for listing/search/category
+/// filtering/sorting without pretending they're the same kind of thing --
+/// `description()`/`category()` are honest about which is which.
+enum Entry {
+    Mapp(crate::pkg::InstalledPackage),
+    Android(crate::androidpkg::InstalledApk),
+}
+
+impl Entry {
+    fn title(&self) -> String {
+        match self {
+            Entry::Mapp(p) => format!("{} v{}", p.name, p.version),
+            Entry::Android(a) => format!("{} (Android)", a.label),
+        }
+    }
+
+    fn category(&self) -> &'static str {
+        match self {
+            Entry::Mapp(p) => describe(&p.name).0,
+            Entry::Android(_) => "Android",
+        }
+    }
+
+    fn description(&self) -> String {
+        match self {
+            Entry::Mapp(p) => describe(&p.name).1.to_string(),
+            Entry::Android(a) => format!(
+                "package {} -- metadata only; no Android runtime to actually run its code",
+                a.package
+            ),
+        }
+    }
+
+    fn sort_key(&self) -> String {
+        match self {
+            Entry::Mapp(p) => p.name.clone(),
+            Entry::Android(a) => a.package.clone(),
+        }
+    }
+
+    fn search_text(&self) -> String {
+        match self {
+            Entry::Mapp(p) => p.name.clone(),
+            Entry::Android(a) => format!("{} {}", a.package, a.label),
+        }
     }
 }
 
@@ -75,14 +128,17 @@ impl StoreState {
         }
     }
 
+    fn all_entries(&self) -> Vec<Entry> {
+        let mut entries: Vec<Entry> = crate::pkg::installed().into_iter().map(Entry::Mapp).collect();
+        entries.extend(crate::androidpkg::installed().into_iter().map(Entry::Android));
+        entries
+    }
+
     /// `["All", ...every distinct category actually present, sorted]` --
     /// computed from the real installed set each time, so it never lists a
     /// category with nothing in it.
-    fn categories(&self) -> alloc::vec::Vec<&'static str> {
-        let mut cats: alloc::vec::Vec<&'static str> = crate::pkg::installed()
-            .iter()
-            .map(|p| describe(&p.name).0)
-            .collect();
+    fn categories(&self) -> Vec<&'static str> {
+        let mut cats: Vec<&'static str> = self.all_entries().iter().map(Entry::category).collect();
         cats.sort_unstable();
         cats.dedup();
         let mut out = alloc::vec!["All"];
@@ -95,26 +151,21 @@ impl StoreState {
         cats[self.category_index % cats.len()]
     }
 
-    fn filtered(&self) -> alloc::vec::Vec<crate::pkg::InstalledPackage> {
-        let mut packages = crate::pkg::installed();
+    fn filtered(&self) -> Vec<Entry> {
+        let mut entries = self.all_entries();
         if !self.search.is_empty() {
             let needle = self.search.to_ascii_lowercase();
-            packages.retain(|p| p.name.to_ascii_lowercase().contains(&needle));
+            entries.retain(|e| e.search_text().to_ascii_lowercase().contains(&needle));
         }
         let category = self.current_category();
         if category != "All" {
-            packages.retain(|p| describe(&p.name).0 == category);
+            entries.retain(|e| e.category() == category);
         }
         // Real, deterministic ordering (category, then name) -- not a
         // popularity/ranking sort, since there's no real usage data to rank
         // by.
-        packages.sort_by(|a, b| {
-            describe(&a.name)
-                .0
-                .cmp(describe(&b.name).0)
-                .then_with(|| a.name.cmp(&b.name))
-        });
-        packages
+        entries.sort_by(|a, b| a.category().cmp(b.category()).then_with(|| a.sort_key().cmp(&b.sort_key())));
+        entries
     }
 
     pub fn handle_char(&mut self, ch: u8) {
@@ -154,16 +205,19 @@ impl StoreState {
         if row < 0 {
             return;
         }
-        let packages = self.filtered();
-        let Some(pkg) = packages.get(row as usize) else {
+        let entries = self.filtered();
+        let Some(entry) = entries.get(row as usize) else {
             return;
         };
 
         let content_w = self.content_w.get() as i32;
         if content_w > 0 && x >= content_w - UNINSTALL_ZONE_W {
-            let removed = crate::fs::root().lock().remove(&pkg.file_name);
+            let (removed, label) = match entry {
+                Entry::Mapp(p) => (crate::fs::root().lock().remove(&p.file_name), p.name.clone()),
+                Entry::Android(a) => (crate::androidpkg::uninstall(&a.package), a.package.clone()),
+            };
             if removed {
-                self.status = format!("uninstalled {}", pkg.name);
+                self.status = format!("uninstalled {label}");
                 crate::gui::notifications::push(
                     crate::gui::notifications::Kind::Info,
                     crate::gui::notifications::Category::Packages,
@@ -173,15 +227,21 @@ impl StoreState {
             return;
         }
 
-        self.status = match crate::pkg::run(&pkg.file_name) {
-            Ok(name) => format!("launched {}", name),
-            Err(err) => format!("launch failed: {}", err),
+        self.status = match entry {
+            Entry::Mapp(p) => match crate::pkg::run(&p.file_name) {
+                Ok(name) => format!("launched {name}"),
+                Err(err) => format!("launch failed: {err}"),
+            },
+            Entry::Android(a) => match crate::androidpkg::launch(&a.package) {
+                Ok(()) => String::from("launched"),
+                Err(err) => err,
+            },
         };
     }
 
     pub fn render(&self, x: i32, y: i32, w: u32, h: u32) {
         self.content_w.set(w);
-        let packages = self.filtered();
+        let entries = self.filtered();
         let neon = crate::gui::theme::accent();
 
         framebuffer::with(|c| {
@@ -217,25 +277,25 @@ impl StoreState {
                 None,
             );
 
-            for (row, pkg) in packages.iter().enumerate() {
+            for (row, entry) in entries.iter().enumerate() {
                 let row_y = y + LIST_TOP + row as i32 * ROW_H;
                 if row_y + ROW_H > y + h as i32 {
                     break;
                 }
-                let (category, desc) = describe(&pkg.name);
                 c.fill_rect(x + 4, row_y, w - 8, ROW_H as u32 - 4, (0x18, 0x1C, 0x26));
                 c.draw_str_at(
                     x + 8,
                     row_y + 4,
-                    &format!("{} v{}  [{}]", pkg.name, pkg.version, category),
+                    &format!("{}  [{}]", entry.title(), entry.category()),
                     (0xE0, 0xE0, 0xE0),
                     None,
                 );
+                let desc = entry.description();
                 let max_desc_chars = ((w as i32 - 16) / 8).max(1) as usize;
                 let desc_line = if desc.len() > max_desc_chars {
                     &desc[..max_desc_chars]
                 } else {
-                    desc
+                    &desc
                 };
                 c.draw_str_at(x + 8, row_y + 16, desc_line, (0x90, 0x90, 0xA0), None);
                 c.draw_str_at(

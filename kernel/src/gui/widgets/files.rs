@@ -2,9 +2,21 @@
 //! directory support in `fs/ramfs.rs`), copy/cut/paste/delete/rename/
 //! mkdir, a right-click context menu, a soft-delete trash folder, search,
 //! multi-select, switchable list/grid views, ZIP compress/extract (shares
-//! `apk.rs`'s STORED-only ZIP reader and the new `zip.rs` writer), a
-//! recent-files list, and single-item drag-and-drop onto a folder row.
-//! Double-clicking a `.mapp` package launches it as a new ring-3 process.
+//! `apk.rs`'s ZIP reader, which now also decompresses real DEFLATE
+//! entries via `inflate.rs`, and `zip.rs`'s writer), a recent-files list,
+//! and single-item drag-and-drop onto a folder row.
+//!
+//! Double-clicking dispatches by real file type (`launch_path`, below):
+//! `.mapp` and `.exe` are genuinely spawned as new ring-3 processes
+//! (`.exe` via `crate::winexe`/`crate::pe`, with an honest "needs real
+//! Win32 APIs" message when a real Windows binary's imports don't match
+//! that loader's tiny supported subset -- see `winexe.rs`'s doc comment);
+//! `.apk` is genuinely parsed and installed into `crate::androidpkg`'s
+//! metadata registry (never executed -- there is no Android runtime);
+//! `.msi` and anything else unrecognized get a plain, honest explanation
+//! instead of silently doing nothing. `.mlnk` is this OS's own shortcut
+//! format (right-click "Create Shortcut") -- a real file holding a target
+//! path, resolved by recursing back into the same dispatch.
 
 use crate::gui::ContextMenu;
 use alloc::collections::{BTreeSet, VecDeque};
@@ -47,6 +59,74 @@ const ACTION_PASTE: u32 = 4;
 const ACTION_NEW_FOLDER: u32 = 5;
 const ACTION_COMPRESS: u32 = 6;
 const ACTION_EXTRACT: u32 = 7;
+const ACTION_RUN: u32 = 8;
+const ACTION_SHORTCUT: u32 = 9;
+const ACTION_PROPERTIES: u32 = 10;
+
+/// Dispatches a double-click (or a `.mlnk` shortcut's resolved target) to
+/// that file's real launch behavior. `.mapp`/`.exe` genuinely spawn a new
+/// ring-3 process; `.apk` is genuinely parsed (real ZIP + DEFLATE + AXML)
+/// and installed into the metadata-only Android registry; everything this
+/// doesn't recognize gets an honest, specific explanation rather than
+/// silently doing nothing.
+fn launch_path(path: &str) -> String {
+    if path.ends_with(".mapp") {
+        match crate::pkg::run(path) {
+            Ok(name) => {
+                record_recent(path);
+                format!("launched {name}")
+            }
+            Err(err) => format!("launch failed: {err}"),
+        }
+    } else if path.ends_with(".exe") {
+        match crate::winexe::run(path) {
+            Ok(name) => {
+                record_recent(path);
+                format!("launched {name}")
+            }
+            Err(err) => err,
+        }
+    } else if path.ends_with(".msi") {
+        String::from(
+            "MSI installer format recognized, but moon OS has no Windows Installer service to run it -- not implemented",
+        )
+    } else if path.ends_with(".apk") {
+        let bytes = crate::fs::root().lock().read(path).map(|d| d.to_vec());
+        match bytes {
+            Some(bytes) => match crate::androidpkg::install(&bytes) {
+                Ok(app) => {
+                    record_recent(path);
+                    crate::gui::notifications::push(
+                        crate::gui::notifications::Kind::Success,
+                        crate::gui::notifications::Category::Packages,
+                        format!("installed Android package {} ({})", app.package, app.label),
+                    );
+                    format!(
+                        "installed {} ({}) -- metadata only, no Android runtime to actually run its code",
+                        app.package, app.label
+                    )
+                }
+                Err(err) => format!("APK install failed: {err}"),
+            },
+            None => String::from("couldn't read that file"),
+        }
+    } else if path.ends_with(".mlnk") {
+        let target = crate::fs::root()
+            .lock()
+            .read(path)
+            .map(|d| String::from_utf8_lossy(d).into_owned());
+        match target {
+            Some(target) if crate::fs::root().lock().exists(&target) => launch_path(&target),
+            Some(target) => format!("shortcut target missing: {target}"),
+            None => String::from("couldn't read shortcut"),
+        }
+    } else if path.ends_with(".zip") {
+        String::from("double-click won't extract a ZIP -- right-click it for Extract")
+    } else {
+        record_recent(path);
+        format!("{} is not a launchable package", file_name(path))
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ViewMode {
@@ -277,20 +357,8 @@ impl FileManagerState {
         };
         if is_dir {
             self.navigate(path);
-        } else if path.ends_with(".mapp") {
-            self.status = match crate::pkg::run(&path) {
-                Ok(name) => {
-                    record_recent(&path);
-                    format!("launched {}", name)
-                }
-                Err(err) => format!("launch failed: {}", err),
-            };
-        } else if path.ends_with(".zip") {
-            self.status =
-                String::from("double-click won't extract a ZIP -- right-click it for Extract");
         } else {
-            record_recent(&path);
-            self.status = format!("{} is not a launchable package", file_name(&path));
+            self.status = launch_path(&path);
         }
     }
 
@@ -379,10 +447,15 @@ impl FileManagerState {
 
         let mut items = Vec::new();
         if let Some(t) = &target {
+            if t.ends_with(".exe") || t.ends_with(".mapp") || t.ends_with(".mlnk") {
+                items.push((String::from("Run"), ACTION_RUN));
+            }
             items.push((String::from("Rename"), ACTION_RENAME));
             items.push((String::from("Delete"), ACTION_DELETE));
             items.push((String::from("Copy"), ACTION_COPY));
             items.push((String::from("Cut"), ACTION_CUT));
+            items.push((String::from("Create Shortcut"), ACTION_SHORTCUT));
+            items.push((String::from("Properties"), ACTION_PROPERTIES));
             items.push((String::from("Compress to ZIP"), ACTION_COMPRESS));
             if t.ends_with(".zip") {
                 items.push((String::from("Extract"), ACTION_EXTRACT));
@@ -397,6 +470,19 @@ impl FileManagerState {
     }
 
     pub fn handle_context_action(&mut self, action: u32) {
+        if action == ACTION_RUN {
+            // Handled before locking `root` below: `launch_path` re-locks
+            // `fs::root()` itself (to read the target's bytes), and this
+            // kernel's `spin::Mutex` isn't reentrant -- doing this inside
+            // the `let root = ...` block below would deadlock the whole
+            // File Manager on its own lock.
+            if let Some(path) = self.context_target.take() {
+                self.status = launch_path(&path);
+            }
+            self.refresh();
+            return;
+        }
+
         let mut root = crate::fs::root().lock();
         match action {
             ACTION_DELETE => {
@@ -516,6 +602,51 @@ impl FileManagerState {
                             self.status.clone(),
                         );
                     }
+                }
+            }
+            ACTION_SHORTCUT => {
+                if let Some(path) = self.context_target.take() {
+                    let label = file_name(&path).to_string();
+                    let base = format!("{}/{}.mlnk", self.current_path.trim_end_matches('/'), label);
+                    let mut dest = base.clone();
+                    let mut n = 1;
+                    while root.exists(&dest) {
+                        n += 1;
+                        dest = format!(
+                            "{}/{}.{}.mlnk",
+                            self.current_path.trim_end_matches('/'),
+                            label,
+                            n
+                        );
+                    }
+                    root.write(&dest, path.as_bytes());
+                    self.status = format!("created shortcut {} -> {}", file_name(&dest), path);
+                }
+            }
+            ACTION_PROPERTIES => {
+                if let Some(path) = self.context_target.take() {
+                    let is_dir = root.is_dir(&path);
+                    let size = root.read(&path).map(|d| d.len()).unwrap_or(0);
+                    let kind = if is_dir {
+                        "folder"
+                    } else if path.ends_with(".exe") {
+                        "Windows PE executable"
+                    } else if path.ends_with(".msi") {
+                        "Windows installer package (unsupported)"
+                    } else if path.ends_with(".apk") {
+                        "Android package"
+                    } else if path.ends_with(".mapp") {
+                        "moon OS package"
+                    } else if path.ends_with(".mlnk") {
+                        "shortcut"
+                    } else {
+                        "file"
+                    };
+                    self.status = if is_dir {
+                        format!("{}: {}", file_name(&path), kind)
+                    } else {
+                        format!("{}: {} -- {} bytes", file_name(&path), kind, size)
+                    };
                 }
             }
             ACTION_EXTRACT => {
@@ -674,6 +805,14 @@ impl FileManagerState {
             (0x90, 0xC8, 0xFF)
         } else if name.ends_with(".mapp") {
             (0x80, 0xE8, 0xA0)
+        } else if name.ends_with(".exe") {
+            (0x90, 0xD8, 0xFF)
+        } else if name.ends_with(".msi") {
+            (0x70, 0xB0, 0xE0)
+        } else if name.ends_with(".apk") {
+            (0xA8, 0xE0, 0x80)
+        } else if name.ends_with(".mlnk") {
+            (0xD0, 0xA8, 0xF0)
         } else if name.ends_with(".zip") {
             (0xE8, 0xC0, 0x60)
         } else if name.ends_with(".txt") {

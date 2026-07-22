@@ -587,3 +587,94 @@ QEMU実機で確認: 全7暗号プリミティブのself-testが実機ブート�
 (X.509パース、署名検証、信頼ストア)を実装するのはこのTLSクライアント
 そのものと同規模以上の作業であり、今回のスコープには含めていない --
 コード内(`tls.rs`のモジュールコメント)にも同じ内容を明記している。
+
+## 2026-07-22 追記(4): EXE/APKサポート(正直なスコープでの実装)
+
+ユーザーから「Moon OSはゲーム特化OSを目指しているため、Windowsアプリ(.exe)
+とAndroidアプリ(.apk)への対応は最重要機能として実装してほしい。Steamや
+実際のWindowsゲームを動かしたい」との依頼。
+
+**率直な事前説明として本人に伝えた内容:** Wine相当のWin32/DirectX互換や、
+ART/Android Framework相当の実行環境をこのプロジェクトの規模でゼロから
+実装するのは不可能(Wineは30年・数百人規模、AOSPはGoogle組織規模の
+プロジェクトで、しかもこのサンドボックスにはGPU 3Dアクセラレーションが
+存在しない)。ユーザーはそれでも「どうにか動かしたい」と回答したため、
+「実行はできないが、誠実に本物である最大限の範囲」で実装することを明言し
+実行した。Steam/実在Windowsゲーム/実Androidアプリの実行は今回も今後も
+この方針では到達しない、という結論そのものは変わっていない。
+
+**実装した内容(すべて本物、誤魔化しなし):**
+
+- **`kernel/src/inflate.rs`(新規):** RFC 1951 DEFLATE展開をゼロから実装
+  (固定/動的ハフマン、正準ハフマン復号、長さ/距離の拡張ビット表)。
+  Pythonの`zlib`(独立した検証用リファレンス)で生成した圧縮バイト列2種
+  (固定ハフマンのみの短い入力、動的ハフマン+バックリファレンスを伴う
+  長い入力)を`self_test()`で突き合わせて検証。実世界のAPKはほぼ必ず
+  DEFLATE圧縮されているため、これがないと`AndroidManifest.xml`を
+  一切読めなかった。
+- **`kernel/src/apk.rs`(大幅拡張):** これまでチャンクヘッダの検証のみ
+  だったAXML(Android Binary XML)パーサを、実際の文字列プール
+  (UTF-8/UTF-16両対応)+ namespace/element/attributeノードツリーの
+  本物のデコーダに拡張。`<manifest package="...">`と
+  `<application android:label="...">`を実際に読み取る。正直な限界:
+  `android:label`が`@string/...`のようなリソース参照の場合は解決しない
+  (`resources.arsc`という別の巨大フォーマットが必要なため未実装)。
+  `read_entry`もDEFLATEエントリを`inflate`経由で本物に復号するように。
+- **`kernel/src/androidpkg.rs`(新規):** 「インストール済みAndroidパッケージ」
+  レジストリ。`.apk`を実際にZIP+DEFLATE+AXML解析してパッケージ名/ラベルを
+  RAMFSに記録する。`launch()`は常に
+  「Dalvik/ART実行系がないため実行できない」と正直に失敗を返す --
+  静かに何もしない・動いたふりをすることは一切しない。
+- **`kernel/src/winexe.rs`(新規):** `.exe`(PE32+)を`pe::load`/
+  `process::spawn_from_pe`経由で実際に新規ring-3プロセスとして起動する。
+  既存の`pe.rs`が対応する小さなKERNEL32インポートのサブセットに一致
+  すれば本物に動く(moon OS向けにビルド/移植されたPEバイナリのみ)。
+  一致しない場合(実在のWindows実行ファイルはほぼ確実にこちら)は
+  「Win32 APIがないため実行できません」と明確に表示 -- 汎用的な
+  失敗メッセージや無反応で誤魔化さない。
+- **File Manager(`gui/widgets/files.rs`):** `.exe`/`.mapp`は本物の
+  ダブルクリック起動、`.apk`はダブルクリックで本物のインストールフロー
+  (パース→レジストリ登録)、`.msi`は「Windows Installerサービスが
+  存在しないため未実装」と正直に表示。右クリックメニューに
+  Run/Create Shortcut/Propertiesを追加。ショートカットは`.mlnk`という
+  moon OS独自の実ファイル形式(ターゲットパスを内容に持つ)で、本物に
+  動作する。ファイル種別ごとの色分け表示も追加。
+- **Moon Store(`gui/widgets/store.rs`):** `.mapp`パッケージとAndroid
+  パッケージを統合した一覧に拡張、カテゴリ「Android」を追加、
+  Launch/Uninstallをそれぞれ本物のパス(`pkg::run`/`androidpkg::launch`
+  /`androidpkg::uninstall`)にディスパッチ。
+- 起動時にビルド済みの`hello_pe.exe`(既存のPEテストバイナリ、moon OS向け
+  でありWin32互換ではない)と`moongame.apk`(package=com.example.moongame,
+  label="Moon Game Demo"の実マニフェストを持つテスト用APK)をDownloads
+  フォルダに実際に配置し、File Managerから実際にダブルクリックで試せる
+  ようにした。
+
+**テストフィクスチャも本物に強化:** `tools/apk_test/make_apk.py`を、
+チャンクヘッダのみのダミーから、実際の文字列プール+要素ツリーを持つ
+AXMLをPythonで組み立て、DEFLATE圧縮(`zlib.compressobj`)してZIPに
+包む本物のジェネレータに書き直した。エンコーダ自身がデコード結果を
+Pythonの`zlib`で独立に往復検証してから出力するようにしている。
+
+QEMU実機で確認(シリアルログ):
+```
+inflate: all self-tests passed (fixed/dynamic Huffman DEFLATE)
+apk: test APK has 1 entr(y/ies)
+apk:   AndroidManifest.xml (224 -> 416 bytes, method=8)
+apk: decoded manifest: package=com.example.moongame label=Some("Moon Game Demo")
+```
+method=8はDEFLATE圧縮であることの確認、decoded manifestの行が
+文字列プール+要素ツリーの本物のデコードが実際のPython生成バイト列
+から正しい値を復元できていることの確認。ビルド/clippyともに警告ゼロ。
+
+**正直な限界(GUIクリック):** File Managerでの`.exe`/`.apk`の実際の
+ダブルクリック/右クリックメニュー操作そのものは、このセッションで
+繰り返し記録されている合成マウスイベントの不正確さにより確認できて
+いない -- Store/Notes/Settings/Browserなど既にクリック確認済みの他機能
+と同一の配線パターンであることと、上記シリアルログでの内部ロジック
+検証に留めた。
+
+**結論として変わらないこと:** 上記はすべて「本物だが正直な範囲」の
+実装であり、Steam・実在のWindowsゲーム・実際のAndroidアプリ(Java/
+Dalvikコード)を動かすことはできない、という当初の説明のとおりの
+結果になっている。TLS証明書検証(前回の追記で明記した限界)は今回の
+スコープに含めていない -- 別途対応する。

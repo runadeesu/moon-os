@@ -7,6 +7,7 @@
 
 extern crate alloc;
 
+mod androidpkg;
 mod apk;
 mod arch;
 mod audio;
@@ -19,6 +20,7 @@ mod framebuffer;
 mod fs;
 mod gui;
 mod i18n;
+mod inflate;
 mod limine;
 mod memory;
 mod net;
@@ -28,6 +30,7 @@ mod power;
 mod process;
 mod sched;
 mod syscall;
+mod winexe;
 mod zip;
 
 use alloc::string::{String, ToString};
@@ -207,6 +210,7 @@ extern "C" fn kmain() -> ! {
     create_home_directories();
     gui::login::ensure_default_account();
     install_bundled_packages();
+    install_demo_files();
     match pkg::run("/apps/init.mapp") {
         Ok(name) => crate::serial_println!("pkg: running {}", name),
         Err(err) => crate::serial_println!("pkg: failed to run init.mapp: {}", err),
@@ -217,6 +221,7 @@ extern "C" fn kmain() -> ! {
         Err(err) => crate::serial_println!("pe: failed to load test binary: {}", err),
     }
 
+    inflate::self_test();
     inspect_apk_test_fixture();
     zip_self_test();
     crypto::self_test();
@@ -259,18 +264,20 @@ static COUNTER_ELF: &[u8] = include_bytes!(env!("USERLAND_COUNTER_ELF"));
 /// end to end.
 static PE_TEST_EXE: &[u8] = include_bytes!(env!("PE_TEST_EXE"));
 
-/// A hand-built test APK -- a minimal ZIP archive with an
-/// `AndroidManifest.xml` entry (`tools/apk_test/`) -- exercising
-/// `kernel/src/apk.rs`'s ZIP container reader and AXML chunk-header parser.
-/// See that module's doc comment for exactly how far "APK support" goes
-/// right now (not very far: no DEFLATE, no manifest tree decoding, and
+/// A hand-built test APK (`tools/apk_test/`) -- a real ZIP archive whose
+/// `AndroidManifest.xml` entry is genuinely DEFLATE-compressed (like a real
+/// APK's) and is a real AXML document (string pool + element tree, not
+/// just a bare chunk header) declaring a package name and application
+/// label. Exercises `kernel/src/inflate.rs`'s DEFLATE decoder and
+/// `kernel/src/apk.rs`'s full manifest parser end to end. See `apk.rs`'s
+/// doc comment for exactly how far "APK support" goes (metadata only --
 /// nowhere near an actual Dalvik/ART runtime).
 static APK_TEST_FILE: &[u8] = include_bytes!(env!("APK_TEST_FILE"));
 
-/// Lists the bundled test APK's ZIP contents, pulls out
-/// `AndroidManifest.xml`, and validates its AXML chunk header -- proof the
-/// container/format parsing in `apk.rs` works, not a claim that moon OS can
-/// run Android apps.
+/// Lists the bundled test APK's ZIP contents, pulls out and fully decodes
+/// `AndroidManifest.xml` (chunk header, then the real string pool + element
+/// tree) -- proof the container/format parsing in `apk.rs` works, not a
+/// claim that moon OS can run Android apps.
 fn inspect_apk_test_fixture() {
     let entries = match apk::list_entries(APK_TEST_FILE) {
         Ok(entries) => entries,
@@ -301,6 +308,18 @@ fn inspect_apk_test_fixture() {
             Err(err) => crate::serial_println!("apk: AndroidManifest.xml is not valid AXML: {}", err),
         },
         Err(err) => crate::serial_println!("apk: failed to extract AndroidManifest.xml: {}", err),
+    }
+
+    // The deeper proof: decode the real string pool + element tree (not
+    // just the chunk header) and recover the manifest's actual package
+    // name/label -- this is what `androidpkg`'s install flow relies on.
+    match apk::manifest_from_apk(APK_TEST_FILE) {
+        Ok(manifest) => crate::serial_println!(
+            "apk: decoded manifest: package={} label={:?}",
+            manifest.package,
+            manifest.label
+        ),
+        Err(err) => crate::serial_println!("apk: failed to decode manifest tree: {}", err),
     }
 }
 
@@ -401,6 +420,27 @@ fn install_bundled_packages() {
         gui::notifications::Category::Packages,
         String::from("installed 2 bundled package(s)"),
     );
+}
+
+/// Drops real, double-click-able `.exe`/`.apk` files into Downloads so the
+/// EXE/APK support added alongside HTTPS can actually be tried from the
+/// desktop, not just proven at boot in the serial log: `hello_pe.exe` is
+/// the same PE32+ binary `PE_TEST_EXE` above already loads and runs (it's
+/// genuinely a moon-OS-native binary, not a real Windows program -- double
+/// -clicking it in the File Manager runs for real), and `moongame.apk` is
+/// the same fixture `inspect_apk_test_fixture` decodes (double-clicking it
+/// runs the real install flow in `crate::androidpkg`).
+fn install_demo_files() {
+    let mut root = fs::root().lock();
+    root.write(
+        &alloc::format!("{}/hello_pe.exe", gui::desktop_icons::DOWNLOADS_DIR),
+        PE_TEST_EXE,
+    );
+    root.write(
+        &alloc::format!("{}/moongame.apk", gui::desktop_icons::DOWNLOADS_DIR),
+        APK_TEST_FILE,
+    );
+    crate::serial_println!("files: seeded hello_pe.exe and moongame.apk into Downloads");
 }
 
 static TASK_A_ITERS: AtomicU64 = AtomicU64::new(0);
