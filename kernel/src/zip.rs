@@ -12,7 +12,7 @@ use alloc::vec::Vec;
 /// Standard IEEE CRC32 (the polynomial every ZIP tool uses), computed
 /// bit-by-bit rather than via a 256-entry lookup table -- these are small
 /// RAMFS files, not worth the table's static memory for the speed.
-fn crc32(data: &[u8]) -> u32 {
+pub(crate) fn crc32(data: &[u8]) -> u32 {
     let mut crc = 0xFFFF_FFFFu32;
     for &byte in data {
         crc ^= u32::from(byte);

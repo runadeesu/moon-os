@@ -34,6 +34,7 @@ pub fn battery_status() -> BatteryStatus {
 /// technique real-mode bootloaders and most hobby OSes use, since it works
 /// on every PC-compatible without needing ACPI tables parsed first.
 pub fn reboot() -> ! {
+    crate::fs::persist::save(); // flush any changes since the last periodic save first
     unsafe {
         // Drain the input buffer first: issuing 0xFE while the controller
         // still has a stale byte pending is a common reason this trick
@@ -54,6 +55,7 @@ pub fn reboot() -> ! {
 /// ACPI S5 shutdown without implementing FADT/DSDT parsing. Only works
 /// under QEMU -- real hardware needs the general ACPI path this skips.
 pub fn shutdown() -> ! {
+    crate::fs::persist::save(); // flush any changes since the last periodic save first
     unsafe {
         outw(0x604, 0x2000);
     }

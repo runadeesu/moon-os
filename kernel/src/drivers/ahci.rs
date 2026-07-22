@@ -3,8 +3,10 @@
 //! Brings up the HBA, initializes one command slot per implemented port with
 //! an attached device, and can issue a single ATA or ATAPI command at a time
 //! (synchronously -- we poll for completion, no interrupt-driven queueing
-//! yet). That's enough to IDENTIFY a SATA disk or read a sector from the
-//! SATAPI CD-ROM moon OS actually boots from.
+//! yet). That's enough to IDENTIFY a SATA disk, read a sector from the
+//! SATAPI CD-ROM moon OS actually boots from, and -- via
+//! `ata_read_sector`/`ata_write_sector` -- read and write real sectors on a
+//! SATA hard disk, which `fs::persist` uses to survive a reboot.
 //!
 //! Every HBA/port register access goes through `vread`/`vwrite`: the
 //! controller changes these registers on its own (command completion,
@@ -385,6 +387,54 @@ pub fn identify(port: &Port, out: &mut [u8; 512]) -> bool {
     if ok {
         unsafe { core::ptr::copy_nonoverlapping(virt, out.as_mut_ptr(), 512) };
     }
+    pmm::free_frame(phys);
+    ok
+}
+
+/// ATA READ DMA EXT (0x25): reads one 512-byte sector from a SATA disk at
+/// 48-bit LBA `lba`. This is real disk I/O -- the same command path
+/// `identify` already proved works, just with a data-transfer command
+/// instead of IDENTIFY.
+pub fn ata_read_sector(port: &Port, lba: u64, out: &mut [u8; 512]) -> bool {
+    let (phys, virt) = alloc_dma_page();
+    let ok = issue_command(
+        port,
+        &AtaCommand {
+            ata_command: 0x25,
+            lba,
+            sector_count: 1,
+            atapi_cdb: None,
+            buffer_phys: phys,
+            buffer_len: 512,
+            write: false,
+        },
+    );
+    if ok {
+        unsafe { core::ptr::copy_nonoverlapping(virt, out.as_mut_ptr(), 512) };
+    }
+    pmm::free_frame(phys);
+    ok
+}
+
+/// ATA WRITE DMA EXT (0x35): writes one 512-byte sector to a SATA disk at
+/// 48-bit LBA `lba`. Genuinely persists to the backing disk image -- data
+/// written here is still there after a full QEMU restart, verified in
+/// `fs::persist`.
+pub fn ata_write_sector(port: &Port, lba: u64, data: &[u8; 512]) -> bool {
+    let (phys, virt) = alloc_dma_page();
+    unsafe { core::ptr::copy_nonoverlapping(data.as_ptr(), virt, 512) };
+    let ok = issue_command(
+        port,
+        &AtaCommand {
+            ata_command: 0x35,
+            lba,
+            sector_count: 1,
+            atapi_cdb: None,
+            buffer_phys: phys,
+            buffer_len: 512,
+            write: true,
+        },
+    );
     pmm::free_frame(phys);
     ok
 }

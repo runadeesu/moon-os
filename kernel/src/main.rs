@@ -171,6 +171,13 @@ extern "C" fn kmain() -> ! {
         }
     }
 
+    fs::persist::init(ahci_ports);
+    if fs::persist::load() {
+        crate::serial_println!("fs::persist: previous session's files/accounts restored");
+    } else {
+        crate::serial_println!("fs::persist: starting fresh (no disk, or no prior snapshot)");
+    }
+
     net::init();
     net::run_demo();
     audio::init();
@@ -192,6 +199,9 @@ extern "C" fn kmain() -> ! {
 
     sched::spawn(task_a);
     sched::spawn(task_b);
+    if fs::persist::available() {
+        sched::spawn(persist_task);
+    }
 
     create_home_directories();
     gui::login::ensure_default_account();
@@ -408,6 +418,23 @@ extern "C" fn task_b() -> ! {
         if n.is_multiple_of(100_000_000) {
             crate::serial_println!("[task B] iteration {}", n);
         }
+    }
+}
+
+/// Flushes RAMFS to the persistent disk roughly every 5 seconds (500 ticks
+/// at the 100 Hz PIT rate) -- periodic snapshotting rather than
+/// write-through, so a crash between saves loses at most that window's
+/// changes (same honest tradeoff any snapshot-based backup makes). Only
+/// spawned when `fs::persist::available()` found a real SATA disk at boot.
+extern "C" fn persist_task() -> ! {
+    let mut last_save = 0u64;
+    loop {
+        let now = sched::ticks();
+        if now.saturating_sub(last_save) >= 500 {
+            fs::persist::save();
+            last_save = now;
+        }
+        core::hint::spin_loop();
     }
 }
 
