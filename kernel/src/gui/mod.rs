@@ -285,8 +285,17 @@ const MENU_W: i32 = 120;
 const AMBIENT_REDRAW_TICKS: u64 = 10;
 
 struct GuiState {
-    /// z-order: the last entry is topmost and holds keyboard focus.
+    /// z-order: the last entry is topmost and holds keyboard focus. Always
+    /// holds `current_desktop`'s windows -- the other virtual desktops'
+    /// windows live in `other_desktops` until switched to (see
+    /// `switch_desktop`), so every existing piece of code that reads
+    /// `gui.windows` keeps working unchanged and is automatically
+    /// per-desktop.
     windows: Vec<Window>,
+    /// The other virtual desktops' window lists. `other_desktops[current_desktop]`
+    /// is always empty/unused -- that desktop's real content is in `windows`.
+    other_desktops: [Vec<Window>; taskbar::WORKSPACE_COUNT],
+    current_desktop: usize,
     next_id: u32,
     cursor_x: i32,
     cursor_y: i32,
@@ -318,8 +327,15 @@ struct GuiState {
 
 impl GuiState {
     const fn new() -> Self {
+        // Array literal length is hand-matched to `taskbar::WORKSPACE_COUNT`
+        // (`Vec::new()` isn't `Copy`, so `[Vec::new(); N]` isn't available
+        // in a const fn) -- the assertion below catches drift at compile
+        // time if that constant ever changes.
+        const _: () = assert!(taskbar::WORKSPACE_COUNT == 4);
         Self {
             windows: Vec::new(),
+            other_desktops: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
+            current_desktop: 0,
             next_id: 1,
             cursor_x: 0,
             cursor_y: 0,
@@ -346,6 +362,28 @@ impl GuiState {
     /// (raising it to the top of z-order), or spawns a new one cascaded
     /// down from the last-opened window so it doesn't land exactly on top
     /// of an existing one.
+    /// Switches to virtual desktop `target`: swaps `windows` (the active
+    /// desktop's real content) out to its own slot in `other_desktops` and
+    /// swaps `target`'s content in. Any in-progress drag/resize/menu state
+    /// is cleared since it refers to window *indices* into the desktop
+    /// being left, which are meaningless once `windows` holds a different
+    /// desktop's list.
+    fn switch_desktop(&mut self, target: usize) {
+        if target == self.current_desktop || target >= taskbar::WORKSPACE_COUNT {
+            return;
+        }
+        core::mem::swap(
+            &mut self.windows,
+            &mut self.other_desktops[self.current_desktop],
+        );
+        core::mem::swap(&mut self.windows, &mut self.other_desktops[target]);
+        self.current_desktop = target;
+        self.dragging = None;
+        self.resizing = None;
+        self.context_menu = None;
+        self.snap_preview = None;
+    }
+
     fn open_app(&mut self, kind: AppKind, screen_w: usize, screen_h: usize) {
         if let Some(idx) = self
             .windows
@@ -946,6 +984,8 @@ pub fn on_mouse(dx: i32, dy: i32, left: bool, right: bool, _middle: bool) {
                 activate_search_hit(&mut gui, screen_w, screen_h, row);
             } else if taskbar::ai_hit(cx, cy, screen_h) {
                 gui.open_app(AppKind::MoonAi, screen_w, screen_h);
+            } else if let Some(target) = taskbar::workspace_hit(cx, cy, screen_h) {
+                gui.switch_desktop(target);
             } else if let Some(slot) = {
                 let slots = taskbar_app_targets(&gui.windows);
                 taskbar::app_icon_index_at(cx, cy, screen_h, slots.len()).map(|idx| slots[idx])
@@ -1263,14 +1303,29 @@ pub fn redraw() {
         clock: alloc::format!("{:02}:{:02}:{:02}", dt.hour, dt.minute, dt.second),
         date: alloc::format!("{:04}-{:02}-{:02}", dt.year, dt.month, dt.day),
     };
+    let mut occupied = [false; taskbar::WORKSPACE_COUNT];
+    for (i, slot) in occupied.iter_mut().enumerate() {
+        *slot = if i == gui.current_desktop {
+            !gui.windows.is_empty()
+        } else {
+            !gui.other_desktops[i].is_empty()
+        };
+    }
+    let workspace = taskbar::WorkspaceInfo {
+        current: gui.current_desktop,
+        occupied,
+    };
     taskbar::render(
         screen_w,
         screen_h,
         &app_icons,
-        gui.search_active,
-        &gui.search_query,
-        &search_results,
+        &taskbar::SearchBoxState {
+            active: gui.search_active,
+            query: &gui.search_query,
+            results: &search_results,
+        },
         &tray,
+        &workspace,
     );
     notifications::render(screen_w as i32 - 16, 16);
     if gui.notif_panel_open {

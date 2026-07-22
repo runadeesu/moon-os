@@ -132,8 +132,36 @@ pub fn ai_hit(x: i32, y: i32, screen_h: usize) -> bool {
     (ai_x()..ai_x() + AI_W).contains(&x) && y >= bar_top(screen_h)
 }
 
+/// Number of virtual desktops/workspaces -- fixed rather than user-
+/// configurable, same pragmatic scope as the theme accent presets.
+pub const WORKSPACE_COUNT: usize = 4;
+const WORKSPACE_BOX_W: i32 = 22;
+const WORKSPACE_GAP: i32 = 4;
+
+fn workspace_x() -> i32 {
+    ai_x() + AI_W + ZONE_GAP
+}
+
+/// Which workspace box (if any) `(x, y)` lands on.
+pub fn workspace_hit(x: i32, y: i32, screen_h: usize) -> Option<usize> {
+    if y < bar_top(screen_h) {
+        return None;
+    }
+    let rel = x - workspace_x();
+    if rel < 0 {
+        return None;
+    }
+    let stride = WORKSPACE_BOX_W + WORKSPACE_GAP;
+    let idx = (rel / stride) as usize;
+    if rel % stride < WORKSPACE_BOX_W && idx < WORKSPACE_COUNT {
+        Some(idx)
+    } else {
+        None
+    }
+}
+
 pub fn apps_x() -> i32 {
-    ai_x() + AI_W + ZONE_GAP * 3
+    workspace_x() + WORKSPACE_COUNT as i32 * (WORKSPACE_BOX_W + WORKSPACE_GAP) + ZONE_GAP * 2
 }
 
 /// Index into the caller's combined pinned+running icon list, in the same
@@ -226,15 +254,33 @@ fn draw_icon_box(
     c.draw_str_at(tx, ty, label, text_color, None);
 }
 
+/// Bundles the search box's transient state into one param so `render`
+/// doesn't grow past a reasonable argument count.
+pub struct SearchBoxState<'a> {
+    pub active: bool,
+    pub query: &'a str,
+    pub results: &'a [(SearchResultKind, String)],
+}
+
+/// Which workspace is active and which ones have any windows open at all --
+/// real state, not decoration, so an empty workspace's box renders visibly
+/// different from one with something in it.
+pub struct WorkspaceInfo {
+    pub current: usize,
+    pub occupied: [bool; WORKSPACE_COUNT],
+}
+
 pub fn render(
     screen_w: usize,
     screen_h: usize,
     app_icons: &[AppIcon],
-    search_active: bool,
-    search_query: &str,
-    search_results: &[(SearchResultKind, String)],
+    search: &SearchBoxState,
     tray: &TrayStats,
+    workspace: &WorkspaceInfo,
 ) {
+    let search_active = search.active;
+    let search_query = search.query;
+    let search_results = search.results;
     let neon = super::theme::accent();
     let top = bar_top(screen_h);
 
@@ -311,9 +357,43 @@ pub fn render(
         c.draw_str_at(aix + 6, sy + (sh - 8) / 2, "AI", neon, None);
     });
 
-    // Pinned + running app icons.
+    // Workspace switcher: one small numbered box per virtual desktop.
     let icon_h = HEIGHT as i32 - APP_ICON_MARGIN * 2;
     let icon_y = top + APP_ICON_MARGIN;
+    let wx = workspace_x();
+    for i in 0..WORKSPACE_COUNT {
+        let x = wx + i as i32 * (WORKSPACE_BOX_W + WORKSPACE_GAP);
+        let active = i == workspace.current;
+        let occupied = workspace.occupied[i];
+        framebuffer::with(|c| {
+            let bg = if active {
+                (0x0E, 0x3A, 0x50)
+            } else {
+                (0x14, 0x16, 0x20)
+            };
+            c.fill_rect(x, icon_y, WORKSPACE_BOX_W as u32, icon_h as u32, bg);
+            if active {
+                c.glow_border(x, icon_y, WORKSPACE_BOX_W as u32, icon_h as u32, neon);
+            }
+            let label = alloc::format!("{}", i + 1);
+            let color = if active {
+                neon
+            } else if occupied {
+                (0xC0, 0xC0, 0xC8)
+            } else {
+                (0x50, 0x54, 0x60)
+            };
+            c.draw_str_at(
+                x + (WORKSPACE_BOX_W - 8) / 2,
+                icon_y + (icon_h - 8) / 2,
+                &label,
+                color,
+                None,
+            );
+        });
+    }
+
+    // Pinned + running app icons.
     let mut ix = apps_x();
     for icon in app_icons {
         framebuffer::with(|c| {
