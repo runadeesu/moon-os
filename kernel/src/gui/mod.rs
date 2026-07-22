@@ -352,8 +352,24 @@ impl GuiState {
             .iter()
             .position(|w| w.title == kind.dock_title())
         {
+            let was_minimized = self.windows[idx].minimized;
+            let icon = taskbar_icon_index_for(&self.windows, idx);
             let mut w = self.windows.remove(idx);
             w.minimized = false;
+            if was_minimized {
+                let now = crate::sched::ticks();
+                let to = (w.x, w.y, w.w, w.h);
+                let from = icon
+                    .map(|i| taskbar::app_icon_rect(i, screen_h))
+                    .unwrap_or(to);
+                w.anim = Some(window::WindowAnim::new(
+                    window::AnimKind::Unminimize,
+                    now,
+                    window::MINIMIZE_ANIM_TICKS,
+                    from,
+                    to,
+                ));
+            }
             self.windows.push(w);
             return;
         }
@@ -363,20 +379,66 @@ impl GuiState {
         let (w, h) = kind.default_size();
         let id = self.next_id;
         self.next_id += 1;
+        let (x, y) = (ax + cascade, ay + cascade);
+        let now = crate::sched::ticks();
         self.windows.push(Window {
             id,
-            x: ax + cascade,
-            y: ay + cascade,
+            x,
+            y,
             w,
             h,
             title: String::from(kind.dock_title()),
             content: kind.new_content(),
             minimized: false,
             maximized: None,
-            opened_at: crate::sched::ticks(),
+            opened_at: now,
             closing_since: None,
+            anim: Some(open_anim(now, x, y, w, h)),
         });
     }
+}
+
+/// A small rect centered on `(x, y, w, h)` -- the "from" an opening window
+/// grows out of, and the "to" a closing window shrinks into, so both read
+/// as real geometry transitions rather than a flat fade.
+fn centered_shrink(x: i32, y: i32, w: u32, h: u32) -> (i32, i32, u32, u32) {
+    let cx = x + w as i32 / 2;
+    let cy = y + h as i32 / 2;
+    let sw = (w / 3).max(window::MIN_W / 2);
+    let sh = (h / 3).max(window::MIN_H / 2);
+    (cx - sw as i32 / 2, cy - sh as i32 / 2, sw, sh)
+}
+
+fn open_anim(now: u64, x: i32, y: i32, w: u32, h: u32) -> window::WindowAnim {
+    window::WindowAnim::new(
+        window::AnimKind::Open,
+        now,
+        window::OPEN_ANIM_TICKS,
+        centered_shrink(x, y, w, h),
+        (x, y, w, h),
+    )
+}
+
+fn close_anim(now: u64, x: i32, y: i32, w: u32, h: u32) -> window::WindowAnim {
+    window::WindowAnim::new(
+        window::AnimKind::Close,
+        now,
+        window::CLOSE_ANIM_TICKS,
+        (x, y, w, h),
+        centered_shrink(x, y, w, h),
+    )
+}
+
+/// The icon index (in the same order the taskbar draws its center row)
+/// window `windows[idx]` currently occupies, if it has one -- used to
+/// animate minimize/unminimize toward/from the real icon position.
+fn taskbar_icon_index_for(windows: &[Window], idx: usize) -> Option<usize> {
+    let slots = taskbar_app_targets(windows);
+    let title = &windows[idx].title;
+    slots.iter().position(|s| match s {
+        TaskbarSlot::Pinned(kind) => kind.dock_title() == title,
+        TaskbarSlot::Window(i) => *i == idx,
+    })
 }
 
 static GUI: Mutex<GuiState> = Mutex::new(GuiState::new());
@@ -438,6 +500,7 @@ pub fn init() {
         maximized: None,
         opened_at: now,
         closing_since: None,
+        anim: Some(open_anim(now, content_left, content_top, 460, 260)),
     });
 
     let id = gui.next_id;
@@ -454,6 +517,13 @@ pub fn init() {
         maximized: None,
         opened_at: now,
         closing_since: None,
+        anim: Some(open_anim(
+            now,
+            content_left,
+            content_top + 260 + 40,
+            300,
+            150,
+        )),
     });
 
     let second_col = content_left + 460 + 40;
@@ -472,6 +542,7 @@ pub fn init() {
         maximized: None,
         opened_at: now,
         closing_since: None,
+        anim: Some(open_anim(now, second_col, content_top, 420, 260)),
     });
 
     let id = gui.next_id;
@@ -491,6 +562,7 @@ pub fn init() {
         maximized: None,
         opened_at: now,
         closing_since: None,
+        anim: Some(open_anim(now, second_col, content_top + 260 + 40, 420, 150)),
     });
     drop(gui);
 
@@ -571,6 +643,7 @@ fn open_files_at(gui: &mut GuiState, screen_w: usize, screen_h: usize, dir: Stri
         let id = gui.next_id;
         gui.next_id += 1;
         let (w, h) = AppKind::Files.default_size();
+        let now = crate::sched::ticks();
         gui.windows.push(Window {
             id,
             x: ax,
@@ -581,8 +654,9 @@ fn open_files_at(gui: &mut GuiState, screen_w: usize, screen_h: usize, dir: Stri
             content: WindowContent::Files(FileManagerState::new_at(dir)),
             minimized: false,
             maximized: None,
-            opened_at: crate::sched::ticks(),
+            opened_at: now,
             closing_since: None,
+            anim: Some(open_anim(now, ax, ay, w, h)),
         });
     }
 }
@@ -638,12 +712,14 @@ pub fn on_tick(now: u64) {
             || gui.resizing.is_some()
             || gui.windows.iter().any(|w| {
                 w.closing_since.is_some()
+                    || w.anim.is_some()
                     || now.saturating_sub(w.opened_at) < window::OPEN_ANIM_TICKS
             })
     };
 
     if animating {
         reap_closed_windows(now);
+        advance_window_anims(now);
         redraw();
     } else if now.is_multiple_of(AMBIENT_REDRAW_TICKS) {
         redraw();
@@ -653,6 +729,28 @@ pub fn on_tick(now: u64) {
 fn reap_closed_windows(now: u64) {
     let mut gui = GUI.lock();
     gui.windows.retain(|w| !w.close_animation_done(now));
+}
+
+/// Clears any window's `anim` once it's finished -- important for more than
+/// tidiness: `on_tick`'s `animating` check (above) treats `anim.is_some()`
+/// as "still animating" so it can redraw every tick instead of only every
+/// `AMBIENT_REDRAW_TICKS`, so a finished animation left dangling here would
+/// force full-rate redraws forever. A finished `Minimize` also flips
+/// `minimized` to `true` here -- the window keeps rendering (shrinking
+/// toward its taskbar icon) with `minimized` still `false` until this
+/// fires.
+fn advance_window_anims(now: u64) {
+    let mut gui = GUI.lock();
+    for w in gui.windows.iter_mut() {
+        let Some(anim) = &w.anim else { continue };
+        if !anim.done(now) {
+            continue;
+        }
+        if anim.kind == window::AnimKind::Minimize {
+            w.minimized = true;
+        }
+        w.anim = None;
+    }
 }
 
 /// Called from the mouse IRQ handler with a decoded packet. `dy` follows the
@@ -855,8 +953,23 @@ pub fn on_mouse(dx: i32, dy: i32, left: bool, right: bool, _middle: bool) {
                 match slot {
                     TaskbarSlot::Pinned(kind) => gui.open_app(kind, screen_w, screen_h),
                     TaskbarSlot::Window(i) => {
-                        if let Some(w) = gui.windows.get_mut(i) {
-                            w.minimized = false;
+                        let was_minimized = gui.windows.get(i).is_some_and(|w| w.minimized);
+                        if was_minimized {
+                            let icon = taskbar_icon_index_for(&gui.windows, i);
+                            if let Some(w) = gui.windows.get_mut(i) {
+                                w.minimized = false;
+                                let to = (w.x, w.y, w.w, w.h);
+                                let from = icon
+                                    .map(|idx| taskbar::app_icon_rect(idx, screen_h))
+                                    .unwrap_or(to);
+                                w.anim = Some(window::WindowAnim::new(
+                                    window::AnimKind::Unminimize,
+                                    now,
+                                    window::MINIMIZE_ANIM_TICKS,
+                                    from,
+                                    to,
+                                ));
+                            }
                         }
                         let w = gui.windows.remove(i);
                         gui.windows.push(w);
@@ -980,14 +1093,40 @@ pub fn on_mouse(dx: i32, dy: i32, left: bool, right: bool, _middle: bool) {
                 if let Some(btn) = w.button_at(cx, cy) {
                     match btn {
                         TitleButton::Close => {
+                            let (x, y, w, h) = (w.x, w.y, w.w, w.h);
                             gui.windows[idx].begin_closing(now);
+                            gui.windows[idx].anim = Some(close_anim(now, x, y, w, h));
                         }
                         TitleButton::Minimize => {
-                            gui.windows[idx].minimized = true;
+                            let icon = taskbar_icon_index_for(&gui.windows, idx);
+                            let (x, y, w, h) = {
+                                let t = &gui.windows[idx];
+                                (t.x, t.y, t.w, t.h)
+                            };
+                            let to = icon
+                                .map(|i| taskbar::app_icon_rect(i, screen_h))
+                                .unwrap_or((x, screen_h as i32, 4, 4));
+                            gui.windows[idx].anim = Some(window::WindowAnim::new(
+                                window::AnimKind::Minimize,
+                                now,
+                                window::MINIMIZE_ANIM_TICKS,
+                                (x, y, w, h),
+                                to,
+                            ));
                         }
                         TitleButton::Maximize => {
+                            let (from_x, from_y, from_w, from_h) = (w.x, w.y, w.w, w.h);
                             let (ax, ay, aw, ah) = content_area(screen_w, screen_h);
                             gui.windows[idx].toggle_maximize(ax, ay, aw, ah);
+                            let target = &gui.windows[idx];
+                            let to = (target.x, target.y, target.w, target.h);
+                            gui.windows[idx].anim = Some(window::WindowAnim::new(
+                                window::AnimKind::Resize,
+                                now,
+                                window::RESIZE_ANIM_TICKS,
+                                (from_x, from_y, from_w, from_h),
+                                to,
+                            ));
                             let w = gui.windows.remove(idx);
                             gui.windows.push(w);
                         }

@@ -29,6 +29,76 @@ pub const MIN_H: u32 = 100;
 
 pub const OPEN_ANIM_TICKS: u64 = 8;
 pub const CLOSE_ANIM_TICKS: u64 = 10;
+pub const RESIZE_ANIM_TICKS: u64 = 10;
+pub const MINIMIZE_ANIM_TICKS: u64 = 12;
+
+/// Which geometry transition a window is currently mid-way through, eased
+/// over `duration` ticks from `from` to `to` -- `Window::display_rect` is
+/// the only thing that reads the interpolation itself, so both chrome and
+/// (since widgets already re-layout correctly at arbitrary sizes, proven by
+/// live drag-resize) content genuinely animate at each intermediate size
+/// rather than just fading an overlay on top of the final size. `kind` is
+/// read by `gui` to know when a finished `Minimize` animation should
+/// actually flip `minimized`, since that window keeps rendering (shrinking
+/// toward its taskbar icon) for a few ticks after the click.
+#[derive(PartialEq, Eq)]
+pub enum AnimKind {
+    Open,
+    Close,
+    Minimize,
+    Unminimize,
+    /// Maximize/restore-from-maximize: `maximized` is already toggled the
+    /// instant the button is clicked, this only smooths out the geometry
+    /// the eye sees getting there.
+    Resize,
+}
+
+pub struct WindowAnim {
+    pub kind: AnimKind,
+    start: u64,
+    duration: u64,
+    from: (i32, i32, u32, u32),
+    to: (i32, i32, u32, u32),
+}
+
+impl WindowAnim {
+    pub fn new(
+        kind: AnimKind,
+        start: u64,
+        duration: u64,
+        from: (i32, i32, u32, u32),
+        to: (i32, i32, u32, u32),
+    ) -> Self {
+        Self {
+            kind,
+            start,
+            duration,
+            from,
+            to,
+        }
+    }
+
+    fn progress_permille(&self, now: u64) -> u32 {
+        let elapsed = now.saturating_sub(self.start).min(self.duration);
+        let p = (elapsed * 1000 / self.duration.max(1)) as u32;
+        // Quadratic ease-out: fast start, gentle settle -- reads as a real
+        // spring-ish window animation rather than a linear slide.
+        let inv = 1000 - p;
+        1000 - inv * inv / 1000
+    }
+
+    pub fn done(&self, now: u64) -> bool {
+        now.saturating_sub(self.start) >= self.duration
+    }
+}
+
+fn lerp_i32(a: i32, b: i32, p: u32) -> i32 {
+    a + (b - a) * p as i32 / 1000
+}
+
+fn lerp_u32(a: u32, b: u32, p: u32) -> u32 {
+    (a as i32 + (b as i32 - a as i32) * p as i32 / 1000).max(1) as u32
+}
 
 pub enum WindowContent {
     Terminal(TerminalState),
@@ -78,6 +148,9 @@ pub struct Window {
     /// the window keeps rendering (fading out) until `CLOSE_ANIM_TICKS`
     /// later, when `gui` actually drops it.
     pub closing_since: Option<u64>,
+    /// A geometry transition in progress (open/close/maximize/restore) --
+    /// see `WindowAnim` and `display_rect`.
+    pub anim: Option<WindowAnim>,
 }
 
 impl Window {
@@ -100,14 +173,19 @@ impl Window {
             && py < self.y + TITLE_BAR_HEIGHT
     }
 
-    fn button_rects(&self) -> [(TitleButton, i32, i32); 3] {
-        let top = self.y + (TITLE_BAR_HEIGHT - BTN_SIZE) / 2;
-        let mut x = self.x + self.w as i32 - BTN_SIZE - 4;
-        let close = (TitleButton::Close, x, top);
-        x -= BTN_SIZE + BTN_GAP;
-        let maximize = (TitleButton::Maximize, x, top);
-        x -= BTN_SIZE + BTN_GAP;
-        let minimize = (TitleButton::Minimize, x, top);
+    /// Button positions for an arbitrary title-bar rect -- shared by
+    /// `button_at` (always the real, logical geometry, so clicks hit-test
+    /// correctly even mid-animation) and `render` (the animated display
+    /// rect, so the buttons never visually detach from the frame around
+    /// them the way an early version of this animation code did).
+    fn button_rects_at(x: i32, y: i32, w: u32) -> [(TitleButton, i32, i32); 3] {
+        let top = y + (TITLE_BAR_HEIGHT - BTN_SIZE) / 2;
+        let mut bx = x + w as i32 - BTN_SIZE - 4;
+        let close = (TitleButton::Close, bx, top);
+        bx -= BTN_SIZE + BTN_GAP;
+        let maximize = (TitleButton::Maximize, bx, top);
+        bx -= BTN_SIZE + BTN_GAP;
+        let minimize = (TitleButton::Minimize, bx, top);
         [minimize, maximize, close]
     }
 
@@ -115,7 +193,7 @@ impl Window {
         if !self.title_bar_contains(px, py) {
             return None;
         }
-        self.button_rects()
+        Self::button_rects_at(self.x, self.y, self.w)
             .into_iter()
             .find(|&(_, bx, by)| px >= bx && px < bx + BTN_SIZE && py >= by && py < by + BTN_SIZE)
             .map(|(btn, _, _)| btn)
@@ -135,6 +213,28 @@ impl Window {
     pub fn resize_to(&mut self, new_w: u32, new_h: u32) {
         self.w = new_w.max(MIN_W);
         self.h = new_h.max(MIN_H);
+    }
+
+    /// The rect actually drawn this frame: the logical `(x, y, w, h)`
+    /// normally, or an eased in-between rect while `anim` is playing.
+    /// Widgets already re-layout correctly at whatever size they're given
+    /// (proven by live drag-resize), so animating this genuinely animates
+    /// content, not just an overlay on top of the final size.
+    fn display_rect(&self, now: u64) -> (i32, i32, u32, u32) {
+        match &self.anim {
+            Some(anim) if !anim.done(now) => {
+                let p = anim.progress_permille(now);
+                let (fx, fy, fw, fh) = anim.from;
+                let (tx, ty, tw, th) = anim.to;
+                (
+                    lerp_i32(fx, tx, p),
+                    lerp_i32(fy, ty, p),
+                    lerp_u32(fw, tw, p),
+                    lerp_u32(fh, th, p),
+                )
+            }
+            _ => (self.x, self.y, self.w, self.h),
+        }
     }
 
     /// Toggles maximized state, filling `(area_x, area_y, area_w, area_h)`
@@ -240,7 +340,9 @@ impl Window {
         } else {
             (0x30, 0x30, 0x38)
         };
-        let outer_h = self.total_height() as u32 + 2;
+
+        let (dx, dy, dw, dh) = self.display_rect(now);
+        let outer_h = TITLE_BAR_HEIGHT as u32 + dh + 2;
 
         // A soft drop shadow: a handful of progressively larger, fainter
         // offset rects behind the window -- cheap compared to a real blur,
@@ -249,9 +351,9 @@ impl Window {
         framebuffer::with(|c| {
             for (offset, alpha) in [(3, 70u8), (6, 40), (9, 20)] {
                 c.blend_rect(
-                    self.x - 1 + offset,
-                    self.y - 1 + offset,
-                    self.w + 2,
+                    dx - 1 + offset,
+                    dy - 1 + offset,
+                    dw + 2,
                     outer_h,
                     (0x00, 0x00, 0x00),
                     alpha,
@@ -261,19 +363,13 @@ impl Window {
 
         framebuffer::with(|c| {
             if focused {
-                c.glow_border(self.x - 1, self.y - 1, self.w + 2, outer_h, neon);
+                c.glow_border(dx - 1, dy - 1, dw + 2, outer_h, neon);
             }
-            c.fill_rect(self.x - 1, self.y - 1, self.w + 2, outer_h, border);
-            c.fill_rect(self.x, self.y, self.w, TITLE_BAR_HEIGHT as u32, title_bg);
-            c.draw_glyphs_at(
-                self.x + 4,
-                self.y + 5,
-                self.title_bytes(),
-                (0xFF, 0xFF, 0xFF),
-                None,
-            );
+            c.fill_rect(dx - 1, dy - 1, dw + 2, outer_h, border);
+            c.fill_rect(dx, dy, dw, TITLE_BAR_HEIGHT as u32, title_bg);
+            c.draw_glyphs_at(dx + 4, dy + 5, self.title_bytes(), (0xFF, 0xFF, 0xFF), None);
 
-            for (btn, bx, by) in self.button_rects() {
+            for (btn, bx, by) in Self::button_rects_at(dx, dy, dw) {
                 let color = match btn {
                     TitleButton::Close => (0xE0, 0x50, 0x50),
                     TitleButton::Maximize => (0x50, 0xC0, 0xE0),
@@ -296,8 +392,8 @@ impl Window {
 
             if self.maximized.is_none() {
                 c.fill_rect(
-                    self.x + self.w as i32 - RESIZE_GRIP,
-                    self.y + self.total_height() - RESIZE_GRIP,
+                    dx + dw as i32 - RESIZE_GRIP,
+                    dy + TITLE_BAR_HEIGHT + dh as i32 - RESIZE_GRIP,
                     RESIZE_GRIP as u32,
                     RESIZE_GRIP as u32,
                     border,
@@ -305,38 +401,39 @@ impl Window {
             }
 
             if focused {
-                c.draw_corner_brackets(self.x - 1, self.y - 1, self.w + 2, outer_h, neon);
+                c.draw_corner_brackets(dx - 1, dy - 1, dw + 2, outer_h, neon);
             }
         });
 
-        let content_y = self.y + TITLE_BAR_HEIGHT;
+        let content_y = dy + TITLE_BAR_HEIGHT;
         match &self.content {
-            WindowContent::Terminal(terminal) => terminal.render(self.x, content_y, self.w, self.h),
-            WindowContent::Settings(settings) => settings.render(self.x, content_y, self.w, self.h),
-            WindowContent::Files(files) => files.render(self.x, content_y, self.w, self.h),
-            WindowContent::Store(store) => store.render(self.x, content_y, self.w, self.h),
-            WindowContent::Notes(notes) => notes.render(self.x, content_y, self.w, self.h),
-            WindowContent::Calculator(calc) => calc.render(self.x, content_y, self.w, self.h),
-            WindowContent::TaskManager(tm) => tm.render(self.x, content_y, self.w, self.h),
-            WindowContent::MoonAi(ai) => ai.render(self.x, content_y, self.w, self.h),
+            WindowContent::Terminal(terminal) => terminal.render(dx, content_y, dw, dh),
+            WindowContent::Settings(settings) => settings.render(dx, content_y, dw, dh),
+            WindowContent::Files(files) => files.render(dx, content_y, dw, dh),
+            WindowContent::Store(store) => store.render(dx, content_y, dw, dh),
+            WindowContent::Notes(notes) => notes.render(dx, content_y, dw, dh),
+            WindowContent::Calculator(calc) => calc.render(dx, content_y, dw, dh),
+            WindowContent::TaskManager(tm) => tm.render(dx, content_y, dw, dh),
+            WindowContent::MoonAi(ai) => ai.render(dx, content_y, dw, dh),
         }
 
-        // Open/close flash: a whole-window overlay whose alpha ramps down
-        // (opening) or up (closing) over a handful of ticks.
+        // A brief fade-in/fade-out overlay layered on top of the geometry
+        // animation above -- opening/closing windows both grow/shrink *and*
+        // fade, closing feels distinct from just "shrinking".
         let flash_alpha = if let Some(since) = self.closing_since {
             let elapsed = now.saturating_sub(since).min(CLOSE_ANIM_TICKS);
-            (200 * elapsed / CLOSE_ANIM_TICKS) as u8
+            (180 * elapsed / CLOSE_ANIM_TICKS) as u8
         } else {
             let elapsed = now.saturating_sub(self.opened_at).min(OPEN_ANIM_TICKS);
-            (200 - 200 * elapsed / OPEN_ANIM_TICKS) as u8
+            (180 - 180 * elapsed / OPEN_ANIM_TICKS) as u8
         };
         if flash_alpha > 0 {
             framebuffer::with(|c| {
                 c.blend_rect(
-                    self.x,
-                    self.y,
-                    self.w,
-                    self.total_height() as u32,
+                    dx,
+                    dy,
+                    dw,
+                    TITLE_BAR_HEIGHT as u32 + dh,
                     (0xF0, 0xF8, 0xFF),
                     flash_alpha,
                 );

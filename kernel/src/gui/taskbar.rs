@@ -20,6 +20,18 @@ pub const APP_ICON_W: i32 = 40;
 const APP_ICON_GAP: i32 = 6;
 const APP_ICON_MARGIN: i32 = 4;
 
+/// The on-screen rect of the `index`-th center icon (same left-to-right
+/// order `render`/`app_icon_index_at` use) -- the target a window's
+/// minimize animation shrinks toward, and the source an unminimize
+/// animation grows from.
+pub fn app_icon_rect(index: usize, screen_h: usize) -> (i32, i32, u32, u32) {
+    let top = bar_top(screen_h);
+    let x = apps_x() + index as i32 * (APP_ICON_W + APP_ICON_GAP);
+    let y = top + APP_ICON_MARGIN;
+    let h = HEIGHT as i32 - APP_ICON_MARGIN * 2;
+    (x, y, APP_ICON_W as u32, h as u32)
+}
+
 const TRAY_ICON_W: i32 = 30;
 const TRAY_STAT_W: i32 = 46;
 const TRAY_NET_W: i32 = 96;
