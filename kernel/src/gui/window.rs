@@ -315,6 +315,14 @@ impl Window {
         }
     }
 
+    /// Completes a single-item drag-and-drop, if the content supports it
+    /// (currently just the File Manager). A no-op for every other widget.
+    pub fn handle_drag_release(&mut self, x: i32, y: i32) {
+        if let WindowContent::Files(files) = &mut self.content {
+            files.handle_drag_release(x, y);
+        }
+    }
+
     /// The title text: fixed English for content that's a technical
     /// term/proper noun (Terminal, File Manager, Moon Store -- like a real
     /// desktop keeps app/protocol names untranslated), and

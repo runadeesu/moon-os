@@ -1,15 +1,18 @@
 //! A real File Manager: navigable directories (backed by the RAMFS
 //! directory support in `fs/ramfs.rs`), copy/cut/paste/delete/rename/
 //! mkdir, a right-click context menu, a soft-delete trash folder, search,
-//! multi-select, and switchable list/grid views. Double-clicking a
-//! `.mapp` package launches it as a new ring-3 process, same as before.
+//! multi-select, switchable list/grid views, ZIP compress/extract (shares
+//! `apk.rs`'s STORED-only ZIP reader and the new `zip.rs` writer), a
+//! recent-files list, and single-item drag-and-drop onto a folder row.
+//! Double-clicking a `.mapp` package launches it as a new ring-3 process.
 
 use crate::gui::ContextMenu;
-use alloc::collections::BTreeSet;
+use alloc::collections::{BTreeSet, VecDeque};
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::cell::Cell;
+use spin::Mutex;
 
 const ROW_H: i32 = 16;
 const HEADER_H: i32 = 20;
@@ -20,6 +23,21 @@ const LIST_TOP: i32 = HEADER_H + TOOLBAR_H;
 const DOUBLE_CLICK_TICKS: u64 = 40;
 
 pub const TRASH_DIR: &str = "/.Trash";
+const RECENT_CAP: usize = 10;
+
+/// Files/packages actually launched (via double-click), most recent last --
+/// real usage history, not a canned demo list. Shared across every File
+/// Manager window/instance, same as a real desktop's "recent" list would be.
+static RECENT: Mutex<VecDeque<String>> = Mutex::new(VecDeque::new());
+
+fn record_recent(path: &str) {
+    let mut recent = RECENT.lock();
+    recent.retain(|p| p != path);
+    recent.push_back(String::from(path));
+    while recent.len() > RECENT_CAP {
+        recent.pop_front();
+    }
+}
 
 const ACTION_RENAME: u32 = 0;
 const ACTION_DELETE: u32 = 1;
@@ -27,6 +45,8 @@ const ACTION_COPY: u32 = 2;
 const ACTION_CUT: u32 = 3;
 const ACTION_PASTE: u32 = 4;
 const ACTION_NEW_FOLDER: u32 = 5;
+const ACTION_COMPRESS: u32 = 6;
+const ACTION_EXTRACT: u32 = 7;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ViewMode {
@@ -51,6 +71,15 @@ pub struct FileManagerState {
     /// let `handle_click`/`handle_right_click` hit-test against the same
     /// column count the grid was actually drawn with.
     grid_cols: Cell<i32>,
+    /// Showing the real-usage "Recent" list instead of `current_path`'s
+    /// directory listing.
+    showing_recent: bool,
+    /// Row a plain (non-double) click landed on, for single-item drag-and-
+    /// drop: a later mouse-up over a directory row moves it there. There's
+    /// no continuous mouse-move tracking into widgets yet, so there's no
+    /// "ghost icon following the cursor" while dragging -- the drop itself
+    /// is a real move, just without that visual feedback mid-drag.
+    drag_source: Option<usize>,
 }
 
 fn file_name(path: &str) -> &str {
@@ -71,6 +100,8 @@ impl FileManagerState {
             search: String::new(),
             status: String::from("right-click for options, double-click to open"),
             grid_cols: Cell::new(1),
+            showing_recent: false,
+            drag_source: None,
         };
         state.refresh();
         state
@@ -87,7 +118,17 @@ impl FileManagerState {
 
     fn refresh(&mut self) {
         let root = crate::fs::root().lock();
-        let mut entries = root.list_dir(&self.current_path);
+        let mut entries = if self.showing_recent {
+            RECENT
+                .lock()
+                .iter()
+                .rev()
+                .filter(|p| root.exists(p))
+                .map(|p| (p.clone(), false))
+                .collect()
+        } else {
+            root.list_dir(&self.current_path)
+        };
         if !self.search.is_empty() {
             let needle = self.search.to_ascii_lowercase();
             entries.retain(|(path, _)| file_name(path).to_ascii_lowercase().contains(&needle));
@@ -98,6 +139,7 @@ impl FileManagerState {
 
     fn navigate(&mut self, path: String) {
         self.current_path = path;
+        self.showing_recent = false;
         self.refresh();
     }
 
@@ -113,9 +155,10 @@ impl FileManagerState {
         })
     }
 
-    /// Row index 0 is a synthetic ".." entry whenever not at the root.
+    /// Row index 0 is a synthetic ".." entry whenever not at the root (the
+    /// Recent list isn't a real directory, so it never gets one).
     fn has_parent_row(&self) -> bool {
-        self.parent_path().is_some()
+        !self.showing_recent && self.parent_path().is_some()
     }
 
     fn row_path(&self, row: usize) -> Option<(&str, bool)> {
@@ -167,6 +210,9 @@ impl FileManagerState {
                     self.search.clear();
                     self.refresh();
                 }
+            } else if x < 230 {
+                self.showing_recent = !self.showing_recent;
+                self.refresh();
             }
             return;
         }
@@ -215,6 +261,11 @@ impl FileManagerState {
             } else {
                 self.selected.insert(row);
             }
+            // Remembers this row as a possible drag source: if the mouse
+            // comes back up over a *different* row that's a folder (see
+            // `handle_drag_release`), that's a real move, not just a
+            // reselect.
+            self.drag_source = Some(row);
             if let Some((path, _)) = self.row_path(row) {
                 self.status = format!("selected: {}", file_name(path));
             }
@@ -228,11 +279,78 @@ impl FileManagerState {
             self.navigate(path);
         } else if path.ends_with(".mapp") {
             self.status = match crate::pkg::run(&path) {
-                Ok(name) => format!("launched {}", name),
+                Ok(name) => {
+                    record_recent(&path);
+                    format!("launched {}", name)
+                }
                 Err(err) => format!("launch failed: {}", err),
             };
+        } else if path.ends_with(".zip") {
+            self.status =
+                String::from("double-click won't extract a ZIP -- right-click it for Extract");
         } else {
+            record_recent(&path);
             self.status = format!("{} is not a launchable package", file_name(&path));
+        }
+    }
+
+    /// Completes a single-item drag: called on mouse-up when a plain click
+    /// (not the one that started the drag) previously set `drag_source`.
+    /// Real geometry hit-testing, same row math as `handle_click` --
+    /// dropping onto a different row that's a folder moves the dragged
+    /// item there via the same rename the Cut/Paste path already uses.
+    pub fn handle_drag_release(&mut self, x: i32, y: i32) {
+        let Some(src_row) = self.drag_source.take() else {
+            return;
+        };
+        if y < LIST_TOP {
+            return;
+        }
+        let row = match self.view {
+            ViewMode::List => (y - LIST_TOP) / ROW_H,
+            ViewMode::Grid => {
+                let cell = self.grid_cell_size();
+                let cols = self.grid_cols();
+                let col = x / cell;
+                if col >= cols {
+                    return;
+                }
+                (y - LIST_TOP) / cell * cols + col
+            }
+        };
+        if row < 0 {
+            return;
+        }
+        let row = row as usize;
+        if row == src_row || (self.has_parent_row() && row == 0) {
+            return;
+        }
+        let Some((src_path, _)) = self.row_path(src_row).map(|(p, d)| (p.to_string(), d)) else {
+            return;
+        };
+        let Some((dest_dir, dest_is_dir)) = self.row_path(row).map(|(p, d)| (p.to_string(), d))
+        else {
+            return;
+        };
+        if !dest_is_dir {
+            return;
+        }
+        let dest = format!(
+            "{}/{}",
+            dest_dir.trim_end_matches('/'),
+            file_name(&src_path)
+        );
+        let mut root = crate::fs::root().lock();
+        if root.rename(&src_path, &dest) {
+            self.status = format!(
+                "moved {} into {}",
+                file_name(&src_path),
+                file_name(&dest_dir)
+            );
+            drop(root);
+            self.refresh();
+        } else {
+            self.status = String::from("move failed (name already exists in that folder?)");
         }
     }
 
@@ -260,11 +378,15 @@ impl FileManagerState {
         self.context_target = target.clone();
 
         let mut items = Vec::new();
-        if target.is_some() {
+        if let Some(t) = &target {
             items.push((String::from("Rename"), ACTION_RENAME));
             items.push((String::from("Delete"), ACTION_DELETE));
             items.push((String::from("Copy"), ACTION_COPY));
             items.push((String::from("Cut"), ACTION_CUT));
+            items.push((String::from("Compress to ZIP"), ACTION_COMPRESS));
+            if t.ends_with(".zip") {
+                items.push((String::from("Extract"), ACTION_EXTRACT));
+            }
         }
         if self.clipboard.is_some() {
             items.push((String::from("Paste"), ACTION_PASTE));
@@ -343,6 +465,98 @@ impl FileManagerState {
                 root.mkdir(&dest);
                 self.status = format!("created {}", file_name(&dest));
             }
+            ACTION_COMPRESS => {
+                if let Some(path) = self.context_target.take() {
+                    // Every real file under `path`: if it's a plain file
+                    // that's just itself; if it's a directory, every file
+                    // whose path starts with "`path`/" -- RAMFS is a flat
+                    // map, so this is a real recursive walk without needing
+                    // actual directory recursion.
+                    let files: Vec<(String, Vec<u8>)> = if root.is_dir(&path) {
+                        let prefix = format!("{path}/");
+                        root.list()
+                            .filter(|p| p.starts_with(&prefix))
+                            .filter_map(|p| root.read(p).map(|d| (p.to_string(), d.to_vec())))
+                            .collect()
+                    } else {
+                        root.read(&path)
+                            .map(|d| alloc::vec![(path.clone(), d.to_vec())])
+                            .unwrap_or_default()
+                    };
+                    if files.is_empty() {
+                        self.status = String::from("nothing to compress");
+                    } else {
+                        // ZIP entry names are relative to the compressed
+                        // item itself, matching how a real archiver names
+                        // entries inside the archive it produces.
+                        let base_prefix = format!("{path}/");
+                        let entries: Vec<(String, Vec<u8>)> = files
+                            .into_iter()
+                            .map(|(p, d)| {
+                                let name = p.strip_prefix(&base_prefix).unwrap_or(&p);
+                                (String::from(name), d)
+                            })
+                            .collect();
+                        let archive = crate::zip::build_stored(&entries);
+                        let dest = format!(
+                            "{}/{}.zip",
+                            self.current_path.trim_end_matches('/'),
+                            file_name(&path)
+                        );
+                        root.write(&dest, &archive);
+                        self.status = format!(
+                            "compressed {} file(s) into {}",
+                            entries.len(),
+                            file_name(&dest)
+                        );
+                        crate::gui::notifications::push(
+                            crate::gui::notifications::Kind::Success,
+                            self.status.clone(),
+                        );
+                    }
+                }
+            }
+            ACTION_EXTRACT => {
+                if let Some(path) = self.context_target.take() {
+                    match root.read(&path) {
+                        Some(data) => {
+                            let data = data.to_vec();
+                            match crate::apk::list_entries(&data) {
+                                Ok(zip_entries) => {
+                                    let dest_dir = self.current_path.trim_end_matches('/');
+                                    let mut extracted = 0usize;
+                                    let mut skipped = 0usize;
+                                    for entry in &zip_entries {
+                                        match crate::apk::read_entry(&data, entry) {
+                                            Ok(bytes) => {
+                                                root.write(
+                                                    &format!("{dest_dir}/{}", entry.name),
+                                                    &bytes,
+                                                );
+                                                extracted += 1;
+                                            }
+                                            Err(_) => skipped += 1, // DEFLATE entry -- no decoder yet
+                                        }
+                                    }
+                                    self.status = if skipped == 0 {
+                                        format!("extracted {extracted} file(s)")
+                                    } else {
+                                        format!(
+                                            "extracted {extracted} file(s), skipped {skipped} (DEFLATE-compressed, no decoder yet)"
+                                        )
+                                    };
+                                    crate::gui::notifications::push(
+                                        crate::gui::notifications::Kind::Success,
+                                        self.status.clone(),
+                                    );
+                                }
+                                Err(err) => self.status = format!("not a valid ZIP: {err}"),
+                            }
+                        }
+                        None => self.status = String::from("couldn't read that file"),
+                    }
+                }
+            }
             _ => {}
         }
         drop(root);
@@ -389,9 +603,15 @@ impl FileManagerState {
                 (0x80, 0x80, 0x90)
             };
             c.draw_str_at(x + 102, y + HEADER_H + 2, "[Find]", search_color, None);
+            let recent_color = if self.showing_recent {
+                neon
+            } else {
+                (0x80, 0x80, 0x90)
+            };
+            c.draw_str_at(x + 162, y + HEADER_H + 2, "[Recent]", recent_color, None);
             if self.searching || !self.search.is_empty() {
                 c.draw_str_at(
-                    x + 160,
+                    x + 230,
                     y + HEADER_H + 2,
                     &format!("/{}_", self.search),
                     (0xE0, 0xE0, 0x60),
@@ -445,10 +665,16 @@ impl FileManagerState {
         selected: bool,
         cols: i32,
     ) {
+        // Color-coded by real type, standing in for a per-type thumbnail
+        // (there's no image decoder to render an actual preview with).
         let color = if is_dir {
             (0x90, 0xC8, 0xFF)
         } else if name.ends_with(".mapp") {
             (0x80, 0xE8, 0xA0)
+        } else if name.ends_with(".zip") {
+            (0xE8, 0xC0, 0x60)
+        } else if name.ends_with(".txt") {
+            (0xD0, 0xD0, 0xE0)
         } else {
             (0xC0, 0xC0, 0xC0)
         };

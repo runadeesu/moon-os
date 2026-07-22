@@ -1193,6 +1193,7 @@ pub fn on_mouse(dx: i32, dy: i32, left: bool, right: bool, _middle: bool) {
         }
 
         if !left {
+            let was_window_drag_or_resize = gui.dragging.is_some() || gui.resizing.is_some();
             if let Some(idx) = gui.dragging.take() {
                 if let Some((sx, sy, sw, sh)) = gui.snap_preview.take() {
                     if let Some(w) = gui.windows.get_mut(idx) {
@@ -1203,6 +1204,20 @@ pub fn on_mouse(dx: i32, dy: i32, left: bool, right: bool, _middle: bool) {
                 }
             }
             gui.resizing = None;
+
+            // A content-area drag-and-drop release: only when this button-
+            // up isn't the tail end of a title-bar drag/resize, and only on
+            // the exact press->release transition (not every tick the
+            // button happens to be up).
+            if !was_window_drag_or_resize && gui.left_was_down {
+                if let Some(idx) = hit_test(&gui.windows, cx, cy) {
+                    let w = &gui.windows[idx];
+                    if !w.title_bar_contains(cx, cy) {
+                        let (lx, ly) = (cx - w.x, cy - w.y - window::TITLE_BAR_HEIGHT);
+                        gui.windows[idx].handle_drag_release(lx, ly);
+                    }
+                }
+            }
         } else if let Some(idx) = gui.dragging {
             if let Some(w) = gui.windows.get_mut(idx) {
                 w.x += dx;

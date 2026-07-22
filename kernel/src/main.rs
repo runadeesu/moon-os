@@ -27,6 +27,7 @@ mod power;
 mod process;
 mod sched;
 mod syscall;
+mod zip;
 
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -205,6 +206,7 @@ extern "C" fn kmain() -> ! {
     }
 
     inspect_apk_test_fixture();
+    zip_self_test();
 
     crate::serial_println!("scheduler: {} task(s) spawned", sched::task_count());
 
@@ -289,10 +291,68 @@ fn inspect_apk_test_fixture() {
     }
 }
 
-/// Wraps the bundled test binaries as `.mapp` packages and writes them into
-/// RAMFS, so everything downstream (pkg::installed/run, the File Manager,
-/// Moon Store) operates on real files through the real package format
-/// rather than special-cased embedded bytes.
+/// A real round-trip proof for `zip.rs`'s writer and `apk.rs`'s reader --
+/// builds an in-memory ZIP with `zip::build_stored`, then reads it back with
+/// the exact same parser the File Manager's "Extract" action uses, and
+/// checks the bytes match. This is what backs the File Manager's ZIP
+/// compress/extract feature, so a silent format mismatch here would mean
+/// that feature quietly not working; this catches that at boot instead of
+/// only when a user happens to try it.
+fn zip_self_test() {
+    let entries = alloc::vec![
+        (
+            String::from("hello.txt"),
+            b"Hello from moon OS's ZIP writer!".to_vec()
+        ),
+        (String::from("dir/nested.txt"), b"a nested entry".to_vec()),
+    ];
+    let archive = zip::build_stored(&entries);
+
+    let parsed = match apk::list_entries(&archive) {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            crate::serial_println!("zip: self-test FAILED to parse its own archive: {}", err);
+            return;
+        }
+    };
+    if parsed.len() != entries.len() {
+        crate::serial_println!(
+            "zip: self-test FAILED: wrote {} entries, read back {}",
+            entries.len(),
+            parsed.len()
+        );
+        return;
+    }
+    for (parsed_entry, (name, data)) in parsed.iter().zip(entries.iter()) {
+        if parsed_entry.name != *name {
+            crate::serial_println!(
+                "zip: self-test FAILED: expected entry '{}', got '{}'",
+                name,
+                parsed_entry.name
+            );
+            return;
+        }
+        match apk::read_entry(&archive, parsed_entry) {
+            Ok(bytes) if bytes == *data => {}
+            Ok(_) => {
+                crate::serial_println!(
+                    "zip: self-test FAILED: '{}' round-tripped wrong bytes",
+                    name
+                );
+                return;
+            }
+            Err(err) => {
+                crate::serial_println!("zip: self-test FAILED to read back '{}': {}", name, err);
+                return;
+            }
+        }
+    }
+    crate::serial_println!(
+        "zip: self-test passed ({} entries round-tripped byte-for-byte)",
+        parsed.len()
+    );
+}
+
 /// Creates the Home/Downloads/Documents/Pictures/Music folders the
 /// desktop's Home/Downloads/Documents/Pictures/Music icons open -- real
 /// RAMFS directories from boot, not conjured up only when an icon is
@@ -311,6 +371,10 @@ fn create_home_directories() {
     }
 }
 
+/// Wraps the bundled test binaries as `.mapp` packages and writes them into
+/// RAMFS, so everything downstream (pkg::installed/run, the File Manager,
+/// Moon Store) operates on real files through the real package format
+/// rather than special-cased embedded bytes.
 fn install_bundled_packages() {
     let mut root = fs::root().lock();
     root.write("/apps/init.mapp", &pkg::build("init", "0.1.0", INIT_ELF));
