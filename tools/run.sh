@@ -12,6 +12,7 @@ qemu-system-x86_64 \
     -m 256M \
     -cdrom "$ISO" \
     -netdev user,id=net0 -device rtl8139,netdev=net0 \
+    -audiodev id=snd0,driver=none -device AC97,audiodev=snd0 \
     -serial stdio \
     -no-reboot -no-shutdown \
     "$@"

@@ -9,6 +9,7 @@ extern crate alloc;
 
 mod apk;
 mod arch;
+mod audio;
 mod drivers;
 mod elf;
 mod font;
@@ -171,6 +172,22 @@ extern "C" fn kmain() -> ! {
 
     net::init();
     net::run_demo();
+    audio::init();
+    audio::beep(); // real boot chime through the AC97 DMA path, not a stub
+
+    crate::serial_println!(
+        "bluetooth: adapter {}",
+        if drivers::bluetooth::adapter_present() {
+            "present"
+        } else {
+            "not detected (real PCI scan, no fake 'connected' state)"
+        }
+    );
+    match power::battery_status() {
+        power::BatteryStatus::AcPowerNoBattery => {
+            crate::serial_println!("power: no ACPI battery device -- running on AC power")
+        }
+    }
 
     sched::spawn(task_a);
     sched::spawn(task_b);
