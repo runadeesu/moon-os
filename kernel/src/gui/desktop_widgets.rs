@@ -173,8 +173,9 @@ fn render_system_monitor(x: i32, y: i32) -> i32 {
 /// Resamples the cumulative TX/RX byte counters (`net::traffic_totals`)
 /// into a bytes/sec rate at most once every `NET_SAMPLE_TICKS`, storing the
 /// result so calls in between just redraw the last real sample instead of
-/// showing a jittery instantaneous value.
-fn sample_net_rate() -> (u64, u64) {
+/// showing a jittery instantaneous value. Also used by the taskbar's
+/// net-speed tray readout, so both places agree on the same sampled rate.
+pub fn sample_net_rate() -> (u64, u64) {
     let now = crate::sched::ticks();
     let last = NET_LAST_SAMPLE_TICK.load(Ordering::Relaxed);
     let elapsed = now.saturating_sub(last);

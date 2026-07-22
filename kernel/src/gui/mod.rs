@@ -21,15 +21,14 @@
 mod cursor;
 mod desktop;
 pub mod desktop_widgets;
-pub mod dock;
 pub mod notifications;
+pub mod taskbar;
 pub mod theme;
-pub mod topbar;
 pub mod widgets;
 pub mod window;
 
 use crate::framebuffer;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use desktop::Star;
 use spin::Mutex;
@@ -140,6 +139,122 @@ impl AppKind {
     }
 }
 
+/// Apps that always show a taskbar icon, running or not -- the "quick
+/// launch" row a real desktop's taskbar keeps pinned. Anything else (Notes,
+/// Calculator, Task Manager) only gets an icon while it's actually open, via
+/// `taskbar_app_targets`.
+const PINNED_APPS: [AppKind; 5] = [
+    AppKind::Terminal,
+    AppKind::Files,
+    AppKind::Store,
+    AppKind::Settings,
+    AppKind::MoonAi,
+];
+
+/// One slot in the taskbar's center icon row: either a pinned app (which may
+/// or may not currently have a window) or an already-open window that isn't
+/// pinned. `usize` indexes into the `windows` slice passed alongside.
+#[derive(Clone, Copy)]
+enum TaskbarSlot {
+    Pinned(AppKind),
+    Window(usize),
+}
+
+fn taskbar_app_targets(windows: &[Window]) -> Vec<TaskbarSlot> {
+    let mut slots: Vec<TaskbarSlot> = PINNED_APPS
+        .iter()
+        .map(|k| TaskbarSlot::Pinned(*k))
+        .collect();
+    for (i, w) in windows.iter().enumerate() {
+        if !PINNED_APPS.iter().any(|k| k.dock_title() == w.title) {
+            slots.push(TaskbarSlot::Window(i));
+        }
+    }
+    slots
+}
+
+fn taskbar_icon_view(
+    slot: &TaskbarSlot,
+    windows: &[Window],
+    focused_id: Option<u32>,
+) -> taskbar::AppIcon {
+    match slot {
+        TaskbarSlot::Pinned(kind) => {
+            let letter = kind
+                .dock_title()
+                .as_bytes()
+                .first()
+                .copied()
+                .unwrap_or(b'?') as char;
+            match windows.iter().find(|w| w.title == kind.dock_title()) {
+                Some(w) => taskbar::AppIcon {
+                    letter,
+                    running: true,
+                    focused: Some(w.id) == focused_id,
+                },
+                None => taskbar::AppIcon {
+                    letter,
+                    running: false,
+                    focused: false,
+                },
+            }
+        }
+        TaskbarSlot::Window(i) => {
+            let w = &windows[*i];
+            taskbar::AppIcon {
+                letter: w.title.as_bytes().first().copied().unwrap_or(b'?') as char,
+                running: true,
+                focused: Some(w.id) == focused_id,
+            }
+        }
+    }
+}
+
+/// A result the taskbar search box found, real either way: an app it can
+/// open, or a RAMFS path it can jump the File Manager to.
+enum SearchHit {
+    App(AppKind),
+    File(String),
+}
+
+fn run_search(query: &str) -> Vec<SearchHit> {
+    let mut hits = Vec::new();
+    if query.is_empty() {
+        return hits;
+    }
+    let needle = query.to_ascii_lowercase();
+    for kind in AppKind::ALL {
+        if kind.label().to_ascii_lowercase().contains(&needle) {
+            hits.push(SearchHit::App(kind));
+        }
+    }
+    let root = crate::fs::root().lock();
+    for path in root.list() {
+        if path.to_ascii_lowercase().contains(&needle) {
+            hits.push(SearchHit::File(String::from(path)));
+            if hits.len() >= 8 {
+                break;
+            }
+        }
+    }
+    hits
+}
+
+fn search_hit_view(hit: &SearchHit) -> (taskbar::SearchResultKind, String) {
+    match hit {
+        SearchHit::App(kind) => (taskbar::SearchResultKind::App, String::from(kind.label())),
+        SearchHit::File(path) => (taskbar::SearchResultKind::File, path.clone()),
+    }
+}
+
+fn parent_dir(path: &str) -> String {
+    match path.rfind('/') {
+        Some(0) => String::from("/"),
+        Some(idx) => path[..idx].to_string(),
+        None => String::from("/"),
+    }
+}
+
 /// Non-character keyboard input the focused window (or the window manager
 /// itself, for Alt+Tab) cares about -- arrow keys for history/cursor
 /// navigation, Alt+Tab for focus cycling.
@@ -185,6 +300,15 @@ struct GuiState {
     snap_preview: Option<(i32, i32, u32, u32)>,
     /// The Moon-button app launcher popup, open or closed.
     moon_menu: Option<ContextMenu>,
+    /// A read-only tray popup (Network/Bluetooth/Battery info) -- any click
+    /// just dismisses it, there's nothing to select.
+    info_popup: Option<ContextMenu>,
+    /// The user-icon's power menu (Reboot/Shutdown).
+    user_menu: Option<ContextMenu>,
+    notif_panel_open: bool,
+    search_active: bool,
+    search_query: String,
+    search_results: Vec<SearchHit>,
 }
 
 impl GuiState {
@@ -202,6 +326,12 @@ impl GuiState {
             context_menu: None,
             snap_preview: None,
             moon_menu: None,
+            info_popup: None,
+            user_menu: None,
+            notif_panel_open: false,
+            search_active: false,
+            search_query: String::new(),
+            search_results: Vec::new(),
         }
     }
 
@@ -261,13 +391,15 @@ fn screen_size() -> (usize, usize) {
     framebuffer::with(|c| (c.width(), c.height())).unwrap_or((800, 600))
 }
 
-/// The desktop's usable content area: clear of the top bar, the left dock,
-/// and the right-side widget panel. Used for maximize and edge-snap.
+/// The desktop's usable content area: clear of the bottom taskbar and the
+/// right-side widget panel (there's no top bar or left dock anymore -- both
+/// folded into the taskbar). Used for maximize, edge-snap, and window
+/// placement.
 fn content_area(screen_w: usize, screen_h: usize) -> (i32, i32, u32, u32) {
-    let x = dock::WIDTH as i32 + 4;
-    let y = topbar::HEIGHT as i32 + 4;
-    let w = screen_w as u32 - dock::WIDTH - desktop_widgets::PANEL_W - 24;
-    let h = screen_h as u32 - topbar::HEIGHT - 8;
+    let x = 8;
+    let y = 8;
+    let w = screen_w as u32 - desktop_widgets::PANEL_W - 24;
+    let h = screen_h as u32 - taskbar::HEIGHT - 16;
     (x, y, w, h)
 }
 
@@ -279,10 +411,10 @@ pub fn init() {
     gui.cursor_y = (screen_h / 2) as i32;
     gui.stars = desktop::generate_stars(screen_w, screen_h, 150);
 
-    // Positioned clear of the top bar and the left dock; the right side is
-    // left open for the calendar/system-monitor desktop widgets.
-    let content_top = topbar::HEIGHT as i32 + 16;
-    let content_left = dock::WIDTH as i32 + 16;
+    // The right side is left open for the calendar/system-monitor desktop
+    // widgets; the bottom is left open for the taskbar.
+    let content_top = 16;
+    let content_left = 16;
     let now = crate::sched::ticks();
 
     let id = gui.next_id;
@@ -370,14 +502,77 @@ fn hit_test(windows: &[Window], x: i32, y: i32) -> Option<usize> {
 
 /// Called from the keyboard IRQ handler with a decoded ASCII byte.
 pub fn on_key(ch: u8) {
+    let (screen_w, screen_h) = screen_size();
     {
         let mut gui = GUI.lock();
-        if let Some(top) = gui.windows.last_mut() {
+        if gui.search_active {
+            match ch {
+                b'\n' | b'\r' => {
+                    if !gui.search_results.is_empty() {
+                        activate_search_hit(&mut gui, screen_w, screen_h, 0);
+                    }
+                }
+                0x08 => {
+                    gui.search_query.pop();
+                    gui.search_results = run_search(&gui.search_query);
+                }
+                0x20..=0x7E => {
+                    gui.search_query.push(ch as char);
+                    gui.search_results = run_search(&gui.search_query);
+                }
+                _ => {}
+            }
+        } else if let Some(top) = gui.windows.last_mut() {
             top.handle_char(ch);
         }
     }
     drain_pending_opens();
     redraw();
+}
+
+/// Runs whatever `search_results[index]` points to (opening an app, or the
+/// File Manager navigated to a found path's parent directory), then closes
+/// the search box. Shared by pressing Enter and clicking a result row.
+fn activate_search_hit(gui: &mut GuiState, screen_w: usize, screen_h: usize, index: usize) {
+    if let Some(hit) = gui.search_results.get(index) {
+        match hit {
+            SearchHit::App(kind) => gui.open_app(*kind, screen_w, screen_h),
+            SearchHit::File(path) => {
+                let dir = parent_dir(path);
+                if let Some(idx) = gui
+                    .windows
+                    .iter()
+                    .position(|w| w.title == AppKind::Files.dock_title())
+                {
+                    let mut w = gui.windows.remove(idx);
+                    w.minimized = false;
+                    w.content = WindowContent::Files(FileManagerState::new_at(dir));
+                    gui.windows.push(w);
+                } else {
+                    let (ax, ay, _, _) = content_area(screen_w, screen_h);
+                    let id = gui.next_id;
+                    gui.next_id += 1;
+                    let (w, h) = AppKind::Files.default_size();
+                    gui.windows.push(Window {
+                        id,
+                        x: ax,
+                        y: ay,
+                        w,
+                        h,
+                        title: String::from(AppKind::Files.dock_title()),
+                        content: WindowContent::Files(FileManagerState::new_at(dir)),
+                        minimized: false,
+                        maximized: None,
+                        opened_at: crate::sched::ticks(),
+                        closing_since: None,
+                    });
+                }
+            }
+        }
+    }
+    gui.search_active = false;
+    gui.search_query.clear();
+    gui.search_results.clear();
 }
 
 /// Opens/focuses whatever `request_open` queued while handling that
@@ -505,23 +700,177 @@ pub fn on_mouse(dx: i32, dy: i32, left: bool, right: bool, _middle: bool) {
                 redraw();
                 return;
             }
-            if topbar::logo_contains(cx, cy) {
-                let items = AppKind::ALL
-                    .iter()
-                    .enumerate()
-                    .map(|(i, kind)| (String::from(kind.label()), i as u32))
-                    .collect();
-                gui.moon_menu = Some(ContextMenu {
-                    x: 4,
-                    y: topbar::HEIGHT as i32 + 2,
-                    items,
-                });
+            // Read-only info popups (Network/Bluetooth/Battery tray icons):
+            // any click just dismisses, there's nothing to select.
+            if gui.info_popup.take().is_some() {
                 gui.left_was_down = left;
                 gui.right_was_down = right;
                 drop(gui);
                 redraw();
                 return;
             }
+            if let Some(menu) = gui.user_menu.take() {
+                let row = (cy - menu.y) / MENU_ROW_H;
+                if cx >= menu.x
+                    && cx < menu.x + MENU_W
+                    && row >= 0
+                    && (row as usize) < menu.items.len()
+                {
+                    match menu.items[row as usize].1 {
+                        0 => crate::power::reboot(),
+                        1 => crate::power::shutdown(),
+                        _ => {}
+                    }
+                }
+                gui.left_was_down = left;
+                gui.right_was_down = right;
+                drop(gui);
+                redraw();
+                return;
+            }
+        }
+
+        // Taskbar clicks: handled entirely separately from window hit-
+        // testing below, since the bar always sits above every app window.
+        if left && !gui.left_was_down && taskbar::bar_contains(cx, cy, screen_h) {
+            gui.context_menu = None;
+
+            let clicked_bell = matches!(
+                taskbar::tray_hit(cx, cy, screen_w, screen_h),
+                Some(taskbar::TrayHit::Notifications)
+            );
+            if gui.notif_panel_open && !clicked_bell {
+                gui.notif_panel_open = false;
+            }
+
+            if taskbar::logo_hit(cx, cy, screen_h) {
+                let items = AppKind::ALL
+                    .iter()
+                    .enumerate()
+                    .map(|(i, kind)| (String::from(kind.label()), i as u32))
+                    .collect();
+                let menu_h = AppKind::ALL.len() as i32 * MENU_ROW_H;
+                gui.moon_menu = Some(ContextMenu {
+                    x: 4,
+                    y: taskbar::bar_top(screen_h) - menu_h,
+                    items,
+                });
+            } else if taskbar::search_hit(cx, cy, screen_h) {
+                gui.search_active = true;
+                gui.search_results = run_search(&gui.search_query);
+            } else if let Some(row) =
+                taskbar::search_result_row_at(cx, cy, screen_h, gui.search_results.len())
+            {
+                activate_search_hit(&mut gui, screen_w, screen_h, row);
+            } else if taskbar::ai_hit(cx, cy, screen_h) {
+                gui.open_app(AppKind::MoonAi, screen_w, screen_h);
+            } else if let Some(slot) = {
+                let slots = taskbar_app_targets(&gui.windows);
+                taskbar::app_icon_index_at(cx, cy, screen_h, slots.len()).map(|idx| slots[idx])
+            } {
+                match slot {
+                    TaskbarSlot::Pinned(kind) => gui.open_app(kind, screen_w, screen_h),
+                    TaskbarSlot::Window(i) => {
+                        if let Some(w) = gui.windows.get_mut(i) {
+                            w.minimized = false;
+                        }
+                        let w = gui.windows.remove(i);
+                        gui.windows.push(w);
+                    }
+                }
+            } else if let Some(hit) = taskbar::tray_hit(cx, cy, screen_w, screen_h) {
+                match hit {
+                    taskbar::TrayHit::Notifications => {
+                        gui.notif_panel_open = !gui.notif_panel_open;
+                        if gui.notif_panel_open {
+                            notifications::mark_all_read();
+                        }
+                    }
+                    taskbar::TrayHit::Volume => {
+                        let next = match crate::audio::volume() {
+                            0 => 100,
+                            v if v <= 25 => 0,
+                            v if v <= 50 => 25,
+                            v if v <= 75 => 50,
+                            _ => 75,
+                        };
+                        crate::audio::set_volume(next);
+                        crate::audio::beep();
+                    }
+                    taskbar::TrayHit::User => {
+                        gui.user_menu = Some(ContextMenu {
+                            x: screen_w as i32 - 140,
+                            y: taskbar::bar_top(screen_h) - 2 * MENU_ROW_H,
+                            items: alloc::vec![
+                                (String::from("Reboot"), 0),
+                                (String::from("Shutdown"), 1),
+                            ],
+                        });
+                    }
+                    taskbar::TrayHit::Network => {
+                        let items = alloc::vec![
+                            (
+                                if crate::net::is_up() {
+                                    alloc::format!(
+                                        "IP: {}",
+                                        crate::net::format_ip(crate::net::our_ip())
+                                    )
+                                } else {
+                                    String::from("No NIC detected")
+                                },
+                                0
+                            ),
+                            (
+                                alloc::format!(
+                                    "Gateway: {}",
+                                    crate::net::format_ip(crate::net::gateway())
+                                ),
+                                0
+                            ),
+                        ];
+                        gui.info_popup = Some(ContextMenu {
+                            x: screen_w as i32 - 220,
+                            y: taskbar::bar_top(screen_h) - 2 * MENU_ROW_H,
+                            items,
+                        });
+                    }
+                    taskbar::TrayHit::Bluetooth => {
+                        gui.info_popup = Some(ContextMenu {
+                            x: screen_w as i32 - 220,
+                            y: taskbar::bar_top(screen_h) - MENU_ROW_H,
+                            items: alloc::vec![(String::from("No Bluetooth adapter detected"), 0)],
+                        });
+                    }
+                    taskbar::TrayHit::Battery => {
+                        gui.info_popup = Some(ContextMenu {
+                            x: screen_w as i32 - 220,
+                            y: taskbar::bar_top(screen_h) - MENU_ROW_H,
+                            items: alloc::vec![(
+                                String::from("Running on AC power (no battery)"),
+                                0
+                            )],
+                        });
+                    }
+                    taskbar::TrayHit::Cpu | taskbar::TrayHit::Ram | taskbar::TrayHit::NetSpeed => {}
+                    taskbar::TrayHit::Clock => {}
+                }
+            } else if gui.search_active {
+                gui.search_active = false;
+            }
+
+            gui.left_was_down = left;
+            gui.right_was_down = right;
+            drop(gui);
+            redraw();
+            return;
+        }
+
+        if left
+            && !gui.left_was_down
+            && gui.search_active
+            && !taskbar::bar_contains(cx, cy, screen_h)
+        {
+            gui.search_active = false;
         }
 
         if right && !gui.right_was_down {
@@ -542,15 +891,7 @@ pub fn on_mouse(dx: i32, dy: i32, left: bool, right: bool, _middle: bool) {
         if left && !gui.left_was_down {
             gui.context_menu = None;
 
-            if cx < dock::WIDTH as i32 {
-                if let Some(idx) = dock::icon_at(gui.windows.len(), topbar::HEIGHT as i32, cx, cy) {
-                    if let Some(w) = gui.windows.get_mut(idx) {
-                        w.minimized = false;
-                    }
-                    let w = gui.windows.remove(idx);
-                    gui.windows.push(w);
-                }
-            } else if let Some(idx) = hit_test(&gui.windows, cx, cy) {
+            if let Some(idx) = hit_test(&gui.windows, cx, cy) {
                 let w = &gui.windows[idx];
                 if let Some(btn) = w.button_at(cx, cy) {
                     match btn {
@@ -631,7 +972,7 @@ fn compute_snap_preview(
 ) -> Option<(i32, i32, u32, u32)> {
     let (ax, ay, aw, ah) = content_area(screen_w, screen_h);
     const EDGE: i32 = 6;
-    if cy <= topbar::HEIGHT as i32 + EDGE {
+    if cy <= EDGE {
         Some((ax, ay, aw, ah))
     } else if cx <= ax + EDGE {
         Some((ax, ay, aw / 2, ah))
@@ -648,10 +989,7 @@ pub fn redraw() {
     let now = crate::sched::ticks();
 
     desktop::render(&gui.stars, screen_w, screen_h, now);
-    desktop_widgets::render(
-        screen_w as i32 - desktop_widgets::PANEL_W as i32 - 16,
-        topbar::HEIGHT as i32 + 16,
-    );
+    desktop_widgets::render(screen_w as i32 - desktop_widgets::PANEL_W as i32 - 16, 16);
 
     let focused_id = gui
         .windows
@@ -671,11 +1009,49 @@ pub fn redraw() {
         });
     }
 
-    // The top bar and dock are OS chrome, always drawn above every app
-    // window -- same convention as a real desktop's menu bar/dock.
-    topbar::render(screen_w);
-    dock::render(&gui.windows, focused_id, screen_h, topbar::HEIGHT as i32);
-    notifications::render(screen_w as i32 - 16, topbar::HEIGHT as i32 + 12);
+    // The taskbar is OS chrome, always drawn above every app window -- same
+    // convention as a real desktop's menu bar/dock.
+    let targets = taskbar_app_targets(&gui.windows);
+    let app_icons: Vec<taskbar::AppIcon> = targets
+        .iter()
+        .map(|slot| taskbar_icon_view(slot, &gui.windows, focused_id))
+        .collect();
+    let search_results: Vec<(taskbar::SearchResultKind, String)> =
+        gui.search_results.iter().map(search_hit_view).collect();
+    let dt = crate::drivers::rtc::read();
+    let stats = crate::memory::pmm::stats();
+    let ram_pct = if stats.total_frames == 0 {
+        0
+    } else {
+        (100 - (stats.free_frames * 100 / stats.total_frames)).min(100) as u8
+    };
+    let (tx_rate, rx_rate) = desktop_widgets::sample_net_rate();
+    let tray = taskbar::TrayStats {
+        cpu_pct: crate::sched::cpu_busy_percent(),
+        ram_pct,
+        net_tx_bps: tx_rate,
+        net_rx_bps: rx_rate,
+        net_connected: crate::net::is_up() && crate::net::our_ip() != crate::net::UNSPECIFIED_IP,
+        bluetooth_present: crate::drivers::bluetooth::adapter_present(),
+        volume_pct: crate::audio::volume(),
+        audio_up: crate::audio::is_up(),
+        unread_notifications: notifications::unread_count(),
+        clock: alloc::format!("{:02}:{:02}:{:02}", dt.hour, dt.minute, dt.second),
+        date: alloc::format!("{:04}-{:02}-{:02}", dt.year, dt.month, dt.day),
+    };
+    taskbar::render(
+        screen_w,
+        screen_h,
+        &app_icons,
+        gui.search_active,
+        &gui.search_query,
+        &search_results,
+        &tray,
+    );
+    notifications::render(screen_w as i32 - 16, 16);
+    if gui.notif_panel_open {
+        notifications::render_history_panel(screen_w as i32 - 16, taskbar::bar_top(screen_h) - 8);
+    }
 
     if let Some((_, menu)) = &gui.context_menu {
         render_context_menu(menu);
@@ -683,10 +1059,16 @@ pub fn redraw() {
     if let Some(menu) = &gui.moon_menu {
         render_context_menu(menu);
     }
+    if let Some(menu) = &gui.user_menu {
+        render_context_menu(menu);
+    }
+    if let Some(menu) = &gui.info_popup {
+        render_context_menu(menu);
+    }
 
     framebuffer::with(|c| {
         let hovering_clickable = gui.dragging.is_none()
-            && (gui.cursor_x < dock::WIDTH as i32
+            && (taskbar::bar_contains(gui.cursor_x, gui.cursor_y, screen_h)
                 || gui.windows.iter().any(|w| {
                     !w.minimized
                         && (w.button_at(gui.cursor_x, gui.cursor_y).is_some()

@@ -76,6 +76,15 @@ impl FileManagerState {
         state
     }
 
+    /// Opens directly into `path` instead of the root -- used by the
+    /// taskbar search box's "jump to this folder" result and the desktop's
+    /// Home/Downloads/Documents/Pictures/Music icons.
+    pub fn new_at(path: String) -> Self {
+        let mut state = Self::new();
+        state.navigate(path);
+        state
+    }
+
     fn refresh(&mut self) {
         let root = crate::fs::root().lock();
         let mut entries = root.list_dir(&self.current_path);

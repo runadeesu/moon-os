@@ -28,10 +28,28 @@ use spin::Mutex;
 const STACK_SIZE: usize = 32 * 1024;
 
 static TICKS: AtomicU64 = AtomicU64::new(0);
+/// Ticks where the task that had just been running (before this tick's
+/// rotation) was anything other than the wrapped idle task (id 0).
+static BUSY_TICKS: AtomicU64 = AtomicU64::new(0);
 
 /// Number of timer ticks (currently 100/sec) since the scheduler started.
 pub fn ticks() -> u64 {
     TICKS.load(Ordering::Relaxed)
+}
+
+/// A real (not fabricated) CPU-busy percentage, computed from how often the
+/// scheduler's tick handler found a non-idle task running -- not per-task
+/// accounting (the Task Manager still has none, see `TaskInfo`), and not a
+/// literal "load average" either: plain round-robin hands the idle task an
+/// equal turn alongside every real task regardless of actual demand, so with
+/// N real tasks running this reads roughly N/(N+1) even when those tasks are
+/// doing nothing useful (moon OS's own demo tasks are busy-loops with no
+/// yield, which is exactly that case). It's an honest reflection of real
+/// scheduler state, just not the same statistic a real OS's CPU meter shows.
+pub fn cpu_busy_percent() -> u8 {
+    let total = TICKS.load(Ordering::Relaxed).max(1);
+    let busy = BUSY_TICKS.load(Ordering::Relaxed);
+    ((busy * 100) / total).min(100) as u8
 }
 
 struct Task {
@@ -192,6 +210,10 @@ pub fn on_timer_tick(current_frame: *mut TrapFrame) -> *mut TrapFrame {
         sched.idle_wrapped = true;
     } else if let Some(running) = sched.tasks.front_mut() {
         running.sp = current_frame as u64;
+    }
+
+    if sched.tasks.front().map(|t| t.id) != Some(0) {
+        BUSY_TICKS.fetch_add(1, Ordering::Relaxed);
     }
 
     if let Some(running) = sched.tasks.pop_front() {
