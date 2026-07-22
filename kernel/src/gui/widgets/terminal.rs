@@ -1,14 +1,15 @@
 //! A built-in terminal widget: a scrollback buffer, a single editable input
 //! line, and a real shell over the RAMFS (`ls`/`cd`/`pwd`/`mkdir`/`touch`/
 //! `rm`/`cp`/`mv`/`cat`/`echo`, with real `>` output redirection into RAMFS
-//! files). Not a real process running through the ELF loader -- these are
-//! kernel-hosted builtins, not `/bin/ls` -- but every operation is real:
-//! `cat`/`ls`/`cd` genuinely read the same `fs::root()` RAMFS the File
-//! Manager and package manager use, `rm`/`mkdir`/`cp`/`mv` genuinely mutate
-//! it. Tab-completion and arrow-key history are real too. Pipes are the one
-//! thing intentionally left out: simulating a shell pipeline between a
-//! handful of builtins (no external processes to actually connect) would be
-//! more theater than feature, so it's not attempted.
+//! files, and real pipes: `grep`/`sort`/`wc`/`head`/`tail` each genuinely
+//! consume the previous stage's output lines, not a simulated connection).
+//! Not a real process running through the ELF loader -- these are kernel-
+//! hosted builtins, not `/bin/ls` -- but every operation is real: `cat`/
+//! `ls`/`cd` genuinely read the same `fs::root()` RAMFS the File Manager and
+//! package manager use, `rm`/`mkdir`/`cp`/`mv` genuinely mutate it.
+//! Tab-completion and arrow-key history are real too. Output is
+//! color-coded by kind (errors/success/directories/etc.), not a flat
+//! single color.
 
 use crate::framebuffer;
 use alloc::collections::VecDeque;
@@ -21,11 +22,38 @@ const LINE_HEIGHT: i32 = 10;
 
 const COMMANDS: &[&str] = &[
     "help", "clear", "uptime", "mem", "echo", "pkg", "pwd", "cd", "ls", "mkdir", "touch", "rm",
-    "cp", "mv", "cat", "whoami", "date", "time", "history", "reboot", "shutdown",
+    "cp", "mv", "cat", "whoami", "date", "time", "history", "grep", "sort", "wc", "head", "tail",
+    "reboot", "shutdown",
 ];
 
+/// A rendered line's color, chosen by what kind of output it is -- real
+/// categorization (error vs. success vs. a directory entry vs. plain text),
+/// not decoration.
+#[derive(Clone, Copy)]
+enum LineColor {
+    Normal,
+    Prompt,
+    Error,
+    Success,
+    Dir,
+    Accent,
+}
+
+impl LineColor {
+    fn rgb(self) -> (u8, u8, u8) {
+        match self {
+            LineColor::Normal => (0xC0, 0xC0, 0xC0),
+            LineColor::Prompt => (0x80, 0x84, 0x90),
+            LineColor::Error => (0xE8, 0x60, 0x60),
+            LineColor::Success => (0x60, 0xE8, 0x90),
+            LineColor::Dir => (0x90, 0xC8, 0xFF),
+            LineColor::Accent => (0xE0, 0xE0, 0x60),
+        }
+    }
+}
+
 pub struct TerminalState {
-    lines: VecDeque<String>,
+    lines: VecDeque<(String, LineColor)>,
     current: String,
     /// Previously entered commands, oldest first -- `Up`/`Down` walk this.
     history: Vec<String>,
@@ -63,7 +91,10 @@ fn resolve(cwd: &str, path: &str) -> String {
 impl TerminalState {
     pub fn new() -> Self {
         let mut lines = VecDeque::new();
-        lines.push_back(String::from("moon OS terminal -- type 'help'"));
+        lines.push_back((
+            String::from("moon OS terminal -- type 'help'"),
+            LineColor::Accent,
+        ));
         Self {
             lines,
             current: String::new(),
@@ -77,7 +108,7 @@ impl TerminalState {
         match ch {
             b'\n' => {
                 let line = core::mem::take(&mut self.current);
-                self.push_line(format!("{} > {}", self.cwd, line));
+                self.push_line(format!("{} > {}", self.cwd, line), LineColor::Prompt);
                 if !line.trim().is_empty() {
                     self.history.push(line.clone());
                 }
@@ -171,8 +202,8 @@ impl TerminalState {
         }
     }
 
-    fn push_line(&mut self, line: String) {
-        self.lines.push_back(line);
+    fn push_line(&mut self, line: String, color: LineColor) {
+        self.lines.push_back((line, color));
         while self.lines.len() > MAX_LINES {
             self.lines.pop_front();
         }
@@ -180,7 +211,7 @@ impl TerminalState {
 
     /// Splits a trailing `> path` (or `>> path`, treated the same as `>` --
     /// RAMFS has no append primitive) off a command line. Returns the
-    /// command part and the redirect target, if any.
+    /// pipeline part and the redirect target, if any.
     fn split_redirect(line: &str) -> (&str, Option<&str>) {
         if let Some(idx) = line.find('>') {
             let cmd = line[..idx].trim_end();
@@ -191,48 +222,91 @@ impl TerminalState {
         }
     }
 
+    /// Runs a full command line: splits off any `> file` redirect, then runs
+    /// each `|`-separated stage in order, feeding each stage's output lines
+    /// into the next as real "stdin" (only `grep`/`sort`/`wc`/`head`/`tail`
+    /// actually read it -- everything else ignores it, same as a real shell
+    /// pipeline where not every command needs stdin).
     fn run_command(&mut self, line: &str) {
-        let (cmd_part, redirect) = Self::split_redirect(line.trim());
-        let mut output = Vec::new();
-        self.dispatch(cmd_part, &mut output);
+        let (pipeline, redirect) = Self::split_redirect(line.trim());
+        let stages: Vec<&str> = pipeline
+            .split('|')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        let mut output: Vec<(String, LineColor)> = Vec::new();
+        for (i, stage) in stages.iter().enumerate() {
+            let mut stage_out = Vec::new();
+            let stdin = if i == 0 {
+                None
+            } else {
+                Some(output.iter().map(|(s, _)| s.clone()).collect::<Vec<_>>())
+            };
+            self.dispatch(stage, stdin.as_deref(), &mut stage_out);
+            output = stage_out;
+        }
 
         match redirect {
             Some(target) => {
                 let path = resolve(&self.cwd, target);
-                let data = output.join("\n");
+                let data = output
+                    .iter()
+                    .map(|(s, _)| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n");
                 crate::fs::root().lock().write(&path, data.as_bytes());
-                self.push_line(format!("(redirected {} line(s) to {})", output.len(), path));
+                self.push_line(
+                    format!("(redirected {} line(s) to {})", output.len(), path),
+                    LineColor::Success,
+                );
             }
             None => {
-                for line in output {
-                    self.push_line(line);
+                for (line, color) in output {
+                    self.push_line(line, color);
                 }
             }
         }
     }
 
-    fn dispatch(&mut self, line: &str, out: &mut Vec<String>) {
+    /// Runs one pipeline stage. `stdin` is `Some` for every stage after the
+    /// first -- the previous stage's output lines, verbatim.
+    fn dispatch(
+        &mut self,
+        line: &str,
+        stdin: Option<&[String]>,
+        out: &mut Vec<(String, LineColor)>,
+    ) {
         let mut parts = line.split_whitespace();
         match parts.next() {
-            Some("help") => out.push(String::from(
-                "help clear uptime mem echo pkg pwd cd ls mkdir touch rm cp mv cat whoami date time history reboot shutdown",
+            Some("help") => out.push((
+                String::from(
+                    "help clear uptime mem echo pkg pwd cd ls mkdir touch rm cp mv cat whoami date time history reboot shutdown | pipes: grep/sort/wc/head/tail",
+                ),
+                LineColor::Accent,
             )),
             Some("clear") => self.lines.clear(),
             Some("uptime") => {
                 let ticks = crate::sched::ticks();
-                out.push(format!("up {} ticks (~{}s at 100Hz)", ticks, ticks / 100));
+                out.push((
+                    format!("up {} ticks (~{}s at 100Hz)", ticks, ticks / 100),
+                    LineColor::Normal,
+                ));
             }
             Some("mem") => {
                 let stats = crate::memory::pmm::stats();
-                out.push(format!(
-                    "{} MiB free / {} MiB total",
-                    (stats.free_frames * 4096) / (1024 * 1024),
-                    (stats.total_frames * 4096) / (1024 * 1024)
+                out.push((
+                    format!(
+                        "{} MiB free / {} MiB total",
+                        (stats.free_frames * 4096) / (1024 * 1024),
+                        (stats.total_frames * 4096) / (1024 * 1024)
+                    ),
+                    LineColor::Normal,
                 ));
             }
-            Some("echo") => out.push(parts.collect::<Vec<_>>().join(" ")),
+            Some("echo") => out.push((parts.collect::<Vec<_>>().join(" "), LineColor::Normal)),
             Some("pkg") => self.run_pkg_command(parts.next(), parts.next(), out),
-            Some("pwd") => out.push(self.cwd.clone()),
+            Some("pwd") => out.push((self.cwd.clone(), LineColor::Normal)),
             Some("cd") => self.run_cd(parts.next(), out),
             Some("ls") => self.run_ls(parts.next(), out),
             Some("mkdir") => self.run_mkdir(parts.next(), out),
@@ -241,71 +315,139 @@ impl TerminalState {
             Some("cp") => self.run_cp(parts.next(), parts.next(), out),
             Some("mv") => self.run_mv(parts.next(), parts.next(), out),
             Some("cat") => self.run_cat(parts.next(), out),
-            Some("whoami") => out.push(String::from("moon")),
+            Some("whoami") => out.push((String::from("moon"), LineColor::Normal)),
             Some("date") => {
                 let dt = crate::drivers::rtc::read();
-                out.push(format!("{:04}-{:02}-{:02}", dt.year, dt.month, dt.day));
+                out.push((
+                    format!("{:04}-{:02}-{:02}", dt.year, dt.month, dt.day),
+                    LineColor::Normal,
+                ));
             }
             Some("time") => {
                 let dt = crate::drivers::rtc::read();
-                out.push(format!("{:02}:{:02}:{:02}", dt.hour, dt.minute, dt.second));
+                out.push((
+                    format!("{:02}:{:02}:{:02}", dt.hour, dt.minute, dt.second),
+                    LineColor::Normal,
+                ));
             }
             Some("history") => {
                 for (i, cmd) in self.history.iter().enumerate() {
-                    out.push(format!("{:4}  {}", i + 1, cmd));
+                    out.push((format!("{:4}  {}", i + 1, cmd), LineColor::Accent));
                 }
             }
+            Some("grep") => match (stdin, parts.next()) {
+                (Some(lines), Some(pattern)) => {
+                    for l in lines {
+                        if l.contains(pattern) {
+                            out.push((l.clone(), LineColor::Normal));
+                        }
+                    }
+                }
+                (None, _) => out.push((
+                    String::from("grep: needs piped input, e.g. ls | grep <pattern>"),
+                    LineColor::Error,
+                )),
+                (_, None) => out.push((String::from("usage: <cmd> | grep <pattern>"), LineColor::Error)),
+            },
+            Some("sort") => match stdin {
+                Some(lines) => {
+                    let mut sorted: Vec<String> = lines.to_vec();
+                    sorted.sort();
+                    for l in sorted {
+                        out.push((l, LineColor::Normal));
+                    }
+                }
+                None => out.push((
+                    String::from("sort: needs piped input, e.g. ls | sort"),
+                    LineColor::Error,
+                )),
+            },
+            Some("wc") => match stdin {
+                Some(lines) => out.push((format!("{} line(s)", lines.len()), LineColor::Normal)),
+                None => out.push((
+                    String::from("wc: needs piped input, e.g. ls | wc"),
+                    LineColor::Error,
+                )),
+            },
+            Some("head") => match stdin {
+                Some(lines) => {
+                    let n: usize = parts.next().and_then(|s| s.parse().ok()).unwrap_or(10);
+                    for l in lines.iter().take(n) {
+                        out.push((l.clone(), LineColor::Normal));
+                    }
+                }
+                None => out.push((
+                    String::from("head: needs piped input, e.g. ls | head 5"),
+                    LineColor::Error,
+                )),
+            },
+            Some("tail") => match stdin {
+                Some(lines) => {
+                    let n: usize = parts.next().and_then(|s| s.parse().ok()).unwrap_or(10);
+                    let start = lines.len().saturating_sub(n);
+                    for l in &lines[start..] {
+                        out.push((l.clone(), LineColor::Normal));
+                    }
+                }
+                None => out.push((
+                    String::from("tail: needs piped input, e.g. ls | tail 5"),
+                    LineColor::Error,
+                )),
+            },
             Some("reboot") => crate::power::reboot(),
             Some("shutdown") => crate::power::shutdown(),
-            Some(other) => out.push(format!("unknown command: {other} (try 'help')")),
+            Some(other) => out.push((
+                format!("unknown command: {other} (try 'help')"),
+                LineColor::Error,
+            )),
             None => {}
         }
     }
 
-    fn run_cd(&mut self, arg: Option<&str>, out: &mut Vec<String>) {
+    fn run_cd(&mut self, arg: Option<&str>, out: &mut Vec<(String, LineColor)>) {
         let target = resolve(&self.cwd, arg.unwrap_or("/"));
         let root = crate::fs::root().lock();
         if root.is_dir(&target) {
             drop(root);
             self.cwd = target;
         } else {
-            out.push(format!("cd: not a directory: {target}"));
+            out.push((format!("cd: not a directory: {target}"), LineColor::Error));
         }
     }
 
-    fn run_ls(&mut self, arg: Option<&str>, out: &mut Vec<String>) {
+    fn run_ls(&mut self, arg: Option<&str>, out: &mut Vec<(String, LineColor)>) {
         let target = resolve(&self.cwd, arg.unwrap_or("."));
         let root = crate::fs::root().lock();
         if !root.is_dir(&target) {
-            out.push(format!("ls: not a directory: {target}"));
+            out.push((format!("ls: not a directory: {target}"), LineColor::Error));
             return;
         }
         let entries = root.list_dir(&target);
         if entries.is_empty() {
-            out.push(String::from("(empty)"));
+            out.push((String::from("(empty)"), LineColor::Normal));
         }
         for (path, is_dir) in entries {
             let name = path.rsplit('/').next().unwrap_or(&path);
-            out.push(if is_dir {
-                format!("{name}/")
+            if is_dir {
+                out.push((format!("{name}/"), LineColor::Dir));
             } else {
-                name.to_string()
-            });
+                out.push((name.to_string(), LineColor::Normal));
+            }
         }
     }
 
-    fn run_mkdir(&mut self, arg: Option<&str>, out: &mut Vec<String>) {
+    fn run_mkdir(&mut self, arg: Option<&str>, out: &mut Vec<(String, LineColor)>) {
         match arg {
             Some(path) => {
                 let target = resolve(&self.cwd, path);
                 crate::fs::root().lock().mkdir(&target);
-                out.push(format!("created {target}"));
+                out.push((format!("created {target}"), LineColor::Success));
             }
-            None => out.push(String::from("usage: mkdir <path>")),
+            None => out.push((String::from("usage: mkdir <path>"), LineColor::Error)),
         }
     }
 
-    fn run_touch(&mut self, arg: Option<&str>, out: &mut Vec<String>) {
+    fn run_touch(&mut self, arg: Option<&str>, out: &mut Vec<(String, LineColor)>) {
         match arg {
             Some(path) => {
                 let target = resolve(&self.cwd, path);
@@ -313,56 +455,62 @@ impl TerminalState {
                 if !root.exists(&target) {
                     root.write(&target, b"");
                 }
-                out.push(format!("touched {target}"));
+                out.push((format!("touched {target}"), LineColor::Success));
             }
-            None => out.push(String::from("usage: touch <path>")),
+            None => out.push((String::from("usage: touch <path>"), LineColor::Error)),
         }
     }
 
-    fn run_rm(&mut self, arg: Option<&str>, out: &mut Vec<String>) {
+    fn run_rm(&mut self, arg: Option<&str>, out: &mut Vec<(String, LineColor)>) {
         match arg {
             Some(path) => {
                 let target = resolve(&self.cwd, path);
                 let mut root = crate::fs::root().lock();
                 if root.remove(&target) || root.rmdir(&target) {
-                    out.push(format!("removed {target}"));
+                    out.push((format!("removed {target}"), LineColor::Success));
                 } else {
-                    out.push(format!("rm: no such file: {target}"));
+                    out.push((format!("rm: no such file: {target}"), LineColor::Error));
                 }
             }
-            None => out.push(String::from("usage: rm <path>")),
+            None => out.push((String::from("usage: rm <path>"), LineColor::Error)),
         }
     }
 
-    fn run_cp(&mut self, src: Option<&str>, dst: Option<&str>, out: &mut Vec<String>) {
+    fn run_cp(&mut self, src: Option<&str>, dst: Option<&str>, out: &mut Vec<(String, LineColor)>) {
         match (src, dst) {
             (Some(src), Some(dst)) => {
                 let (src, dst) = (resolve(&self.cwd, src), resolve(&self.cwd, dst));
                 if crate::fs::root().lock().copy(&src, &dst) {
-                    out.push(format!("copied {src} -> {dst}"));
+                    out.push((format!("copied {src} -> {dst}"), LineColor::Success));
                 } else {
-                    out.push(format!("cp: failed ({src} missing, or {dst} exists?)"));
+                    out.push((
+                        format!("cp: failed ({src} missing, or {dst} exists?)"),
+                        LineColor::Error,
+                    ));
                 }
             }
-            _ => out.push(String::from("usage: cp <src> <dst>")),
+            _ => out.push((String::from("usage: cp <src> <dst>"), LineColor::Error)),
         }
     }
 
-    fn run_mv(&mut self, src: Option<&str>, dst: Option<&str>, out: &mut Vec<String>) {
+    fn run_mv(&mut self, src: Option<&str>, dst: Option<&str>, out: &mut Vec<(String, LineColor)>) {
         match (src, dst) {
             (Some(src), Some(dst)) => {
                 let (src, dst) = (resolve(&self.cwd, src), resolve(&self.cwd, dst));
                 if crate::fs::root().lock().rename(&src, &dst) {
-                    out.push(format!("moved {src} -> {dst}"));
+                    out.push((format!("moved {src} -> {dst}"), LineColor::Success));
                 } else {
-                    out.push(format!("mv: failed ({src} missing, or {dst} exists?)"));
+                    out.push((
+                        format!("mv: failed ({src} missing, or {dst} exists?)"),
+                        LineColor::Error,
+                    ));
                 }
             }
-            _ => out.push(String::from("usage: mv <src> <dst>")),
+            _ => out.push((String::from("usage: mv <src> <dst>"), LineColor::Error)),
         }
     }
 
-    fn run_cat(&mut self, arg: Option<&str>, out: &mut Vec<String>) {
+    fn run_cat(&mut self, arg: Option<&str>, out: &mut Vec<(String, LineColor)>) {
         match arg {
             Some(path) => {
                 let target = resolve(&self.cwd, path);
@@ -371,27 +519,38 @@ impl TerminalState {
                     Some(data) => match core::str::from_utf8(data) {
                         Ok(text) => {
                             for line in text.lines() {
-                                out.push(line.to_string());
+                                out.push((line.to_string(), LineColor::Normal));
                             }
                         }
-                        Err(_) => out.push(format!("cat: {target} is not valid UTF-8")),
+                        Err(_) => out.push((
+                            format!("cat: {target} is not valid UTF-8"),
+                            LineColor::Error,
+                        )),
                     },
-                    None => out.push(format!("cat: no such file: {target}")),
+                    None => out.push((format!("cat: no such file: {target}"), LineColor::Error)),
                 }
             }
-            None => out.push(String::from("usage: cat <path>")),
+            None => out.push((String::from("usage: cat <path>"), LineColor::Error)),
         }
     }
 
-    fn run_pkg_command(&mut self, sub: Option<&str>, arg: Option<&str>, out: &mut Vec<String>) {
+    fn run_pkg_command(
+        &mut self,
+        sub: Option<&str>,
+        arg: Option<&str>,
+        out: &mut Vec<(String, LineColor)>,
+    ) {
         match sub {
             Some("list") => {
                 let packages = crate::pkg::installed();
                 if packages.is_empty() {
-                    out.push(String::from("no packages installed"));
+                    out.push((String::from("no packages installed"), LineColor::Normal));
                 }
                 for p in packages {
-                    out.push(format!("{} {} ({})", p.name, p.version, p.file_name));
+                    out.push((
+                        format!("{} {} ({})", p.name, p.version, p.file_name),
+                        LineColor::Normal,
+                    ));
                 }
             }
             Some("run") => match arg {
@@ -402,16 +561,21 @@ impl TerminalState {
                         .map(|p| p.file_name);
                     match target {
                         Some(file_name) => match crate::pkg::run(&file_name) {
-                            Ok(name) => out.push(format!("running {name}")),
-                            Err(err) => out.push(format!("pkg run failed: {err}")),
+                            Ok(name) => out.push((format!("running {name}"), LineColor::Success)),
+                            Err(err) => {
+                                out.push((format!("pkg run failed: {err}"), LineColor::Error))
+                            }
                         },
-                        None => out.push(format!("no such package: {name}")),
+                        None => out.push((format!("no such package: {name}"), LineColor::Error)),
                     }
                 }
-                None => out.push(String::from("usage: pkg run <name>")),
+                None => out.push((String::from("usage: pkg run <name>"), LineColor::Error)),
             },
-            Some(other) => out.push(format!("unknown pkg subcommand: {other}")),
-            None => out.push(String::from("usage: pkg list | pkg run <name>")),
+            Some(other) => out.push((format!("unknown pkg subcommand: {other}"), LineColor::Error)),
+            None => out.push((
+                String::from("usage: pkg list | pkg run <name>"),
+                LineColor::Error,
+            )),
         }
     }
 
@@ -425,7 +589,7 @@ impl TerminalState {
             let start = self.lines.len().saturating_sub(history_rows);
 
             let max_chars = ((w as i32 - 8) / 8).max(1) as usize;
-            for (row, line) in self.lines.iter().skip(start).enumerate() {
+            for (row, (line, color)) in self.lines.iter().skip(start).enumerate() {
                 let text = if line.len() > max_chars {
                     &line[..max_chars]
                 } else {
@@ -435,7 +599,7 @@ impl TerminalState {
                     x + 4,
                     y + 4 + row as i32 * LINE_HEIGHT,
                     text,
-                    (0xC0, 0xC0, 0xC0),
+                    color.rgb(),
                     None,
                 );
             }
