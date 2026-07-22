@@ -1,10 +1,10 @@
 //! A settings/system-info widget: live memory, scheduler, and uptime
 //! stats, plus what's actually configurable -- UI language (`crate::i18n`),
-//! the accent color (`super::super::theme`), and real power actions
-//! (reboot/shutdown, `crate::power`) -- each changed/triggered by clicking
-//! its row. Network/Bluetooth/mouse/account/privacy panels aren't here
-//! because there's no real subsystem behind them yet (no Wi-Fi/Bluetooth
-//! driver, no account system) -- adding toggles for those would just be
+//! the accent color (`super::super::theme`), mouse sensitivity
+//! (`super::super::mouse_speed`), and real power actions (reboot/shutdown,
+//! `crate::power`) -- each changed/triggered by clicking its row.
+//! Network/Bluetooth/account/privacy panels aren't here because there's no
+//! real subsystem behind them yet -- adding toggles for those would just be
 //! decoration, not settings.
 
 use crate::framebuffer;
@@ -18,7 +18,8 @@ const TASKS_Y: i32 = MEMORY_Y + ROW_H;
 const UPTIME_Y: i32 = TASKS_Y + ROW_H;
 const LANG_Y: i32 = UPTIME_Y + ROW_H + 6;
 const ACCENT_Y: i32 = LANG_Y + ROW_H;
-const HINT_Y: i32 = ACCENT_Y + ROW_H;
+const MOUSE_Y: i32 = ACCENT_Y + ROW_H;
+const HINT_Y: i32 = MOUSE_Y + ROW_H;
 const POWER_Y: i32 = HINT_Y + ROW_H + 6;
 
 pub struct SettingsState;
@@ -34,6 +35,8 @@ impl SettingsState {
             i18n::cycle();
         } else if (ACCENT_Y - 2..ACCENT_Y + ROW_H).contains(&y) {
             super::super::theme::cycle_accent();
+        } else if (MOUSE_Y - 2..MOUSE_Y + ROW_H).contains(&y) {
+            super::super::mouse_speed::cycle();
         } else if (POWER_Y - 2..POWER_Y + ROW_H).contains(&y) {
             if x < 90 {
                 crate::power::reboot();
@@ -111,6 +114,16 @@ impl SettingsState {
                 (0x14, 0x2A, 0x36),
             );
             c.draw_str_at(x + 6, y + ACCENT_Y, &accent_line, accent, None);
+
+            let mouse_line = alloc::format!("Mouse speed: {}", super::super::mouse_speed::name());
+            c.fill_rect(
+                x + 2,
+                y + MOUSE_Y - 2,
+                w - 4,
+                (ROW_H + 2) as u32,
+                (0x14, 0x2A, 0x36),
+            );
+            c.draw_str_at(x + 6, y + MOUSE_Y, &mouse_line, accent, None);
 
             c.draw_glyphs_at(
                 x + 6,

@@ -23,6 +23,7 @@ mod desktop;
 pub mod desktop_icons;
 pub mod desktop_widgets;
 pub mod login;
+pub mod mouse_speed;
 pub mod notifications;
 pub mod taskbar;
 pub mod theme;
@@ -822,8 +823,9 @@ pub fn on_mouse(dx: i32, dy: i32, left: bool, right: bool, _middle: bool) {
 
     {
         let mut gui = GUI.lock();
-        gui.cursor_x = (gui.cursor_x + dx).clamp(0, screen_w as i32 - 1);
-        gui.cursor_y = (gui.cursor_y - dy).clamp(0, screen_h as i32 - 1);
+        let (sdx, sdy) = (mouse_speed::scale(dx), mouse_speed::scale(dy));
+        gui.cursor_x = (gui.cursor_x + sdx).clamp(0, screen_w as i32 - 1);
+        gui.cursor_y = (gui.cursor_y - sdy).clamp(0, screen_h as i32 - 1);
         let (cx, cy) = (gui.cursor_x, gui.cursor_y);
 
         if gui.locked {
@@ -905,7 +907,7 @@ pub fn on_mouse(dx: i32, dy: i32, left: bool, right: bool, _middle: bool) {
                         1 => crate::power::shutdown(),
                         2 => {
                             gui.locked = true;
-                            gui.login = login::LoginState::new();
+                            gui.login.lock();
                         }
                         _ => {}
                     }
