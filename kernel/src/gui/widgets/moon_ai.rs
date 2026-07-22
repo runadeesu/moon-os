@@ -95,6 +95,9 @@ impl MoonAiState {
         } else if text.contains("task manager") || text.trim() == "tasks" {
             crate::gui::request_open("taskmanager");
             String::from("Opening Task Manager.")
+        } else if text.contains("open browser") || text.trim() == "browser" {
+            crate::gui::request_open("browser");
+            String::from("Opening Browser.")
         } else if text.contains("search") || text.contains("find") {
             let needle =
                 Self::word_after(&text, &["search files for", "search for", "find", "search"])
@@ -133,7 +136,7 @@ impl MoonAiState {
             crate::power::shutdown();
         } else if text.contains("help") {
             String::from(
-                "I can: open <settings|files|terminal|store|notes|calculator|task manager>, \
+                "I can: open <settings|files|terminal|store|notes|calculator|task manager|browser>, \
                  search files for <name>, tell you the time/date/memory, or reboot/shutdown.",
             )
         } else {

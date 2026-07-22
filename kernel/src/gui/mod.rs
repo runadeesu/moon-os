@@ -36,9 +36,9 @@ use alloc::vec::Vec;
 use desktop::Star;
 use spin::Mutex;
 use widgets::{
-    calculator::CalculatorState, files::FileManagerState, moon_ai::MoonAiState, notes::NotesState,
-    settings::SettingsState, store::StoreState, taskmanager::TaskManagerState,
-    terminal::TerminalState,
+    browser::BrowserState, calculator::CalculatorState, files::FileManagerState,
+    moon_ai::MoonAiState, notes::NotesState, settings::SettingsState, store::StoreState,
+    taskmanager::TaskManagerState, terminal::TerminalState,
 };
 use window::{TitleButton, Window, WindowContent};
 
@@ -56,10 +56,11 @@ enum AppKind {
     Calculator,
     TaskManager,
     MoonAi,
+    Browser,
 }
 
 impl AppKind {
-    const ALL: [AppKind; 8] = [
+    const ALL: [AppKind; 9] = [
         AppKind::Terminal,
         AppKind::Settings,
         AppKind::Files,
@@ -68,6 +69,7 @@ impl AppKind {
         AppKind::Calculator,
         AppKind::TaskManager,
         AppKind::MoonAi,
+        AppKind::Browser,
     ];
 
     fn label(self) -> &'static str {
@@ -80,6 +82,7 @@ impl AppKind {
             AppKind::Calculator => "Calculator",
             AppKind::TaskManager => "Task Manager",
             AppKind::MoonAi => "Moon AI",
+            AppKind::Browser => "Browser",
         }
     }
 
@@ -96,6 +99,7 @@ impl AppKind {
             AppKind::Calculator => "Calc",
             AppKind::TaskManager => "Jobs",
             AppKind::MoonAi => "AI",
+            AppKind::Browser => "Browser",
         }
     }
 
@@ -109,6 +113,7 @@ impl AppKind {
             AppKind::Calculator => WindowContent::Calculator(CalculatorState::new()),
             AppKind::TaskManager => WindowContent::TaskManager(TaskManagerState),
             AppKind::MoonAi => WindowContent::MoonAi(MoonAiState::new()),
+            AppKind::Browser => WindowContent::Browser(BrowserState::new()),
         }
     }
 
@@ -122,6 +127,7 @@ impl AppKind {
             AppKind::Calculator => (200, 260),
             AppKind::TaskManager => (280, 220),
             AppKind::MoonAi => (380, 240),
+            AppKind::Browser => (480, 320),
         }
     }
 
@@ -137,6 +143,7 @@ impl AppKind {
             "calculator" => AppKind::Calculator,
             "taskmanager" => AppKind::TaskManager,
             "moonai" => AppKind::MoonAi,
+            "browser" => AppKind::Browser,
             _ => return None,
         })
     }

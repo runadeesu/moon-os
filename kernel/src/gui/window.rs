@@ -12,9 +12,9 @@
 //! change than this pass makes.
 
 use super::widgets::{
-    calculator::CalculatorState, files::FileManagerState, moon_ai::MoonAiState, notes::NotesState,
-    settings::SettingsState, store::StoreState, taskmanager::TaskManagerState,
-    terminal::TerminalState,
+    browser::BrowserState, calculator::CalculatorState, files::FileManagerState,
+    moon_ai::MoonAiState, notes::NotesState, settings::SettingsState, store::StoreState,
+    taskmanager::TaskManagerState, terminal::TerminalState,
 };
 use crate::framebuffer;
 use alloc::string::String;
@@ -109,6 +109,7 @@ pub enum WindowContent {
     Calculator(CalculatorState),
     TaskManager(TaskManagerState),
     MoonAi(MoonAiState),
+    Browser(BrowserState),
 }
 
 impl WindowContent {
@@ -278,6 +279,7 @@ impl Window {
             WindowContent::Store(store) => store.handle_char(ch),
             WindowContent::Notes(notes) => notes.handle_char(ch),
             WindowContent::MoonAi(ai) => ai.handle_char(ch),
+            WindowContent::Browser(browser) => browser.handle_char(ch),
             WindowContent::Settings(_)
             | WindowContent::Calculator(_)
             | WindowContent::TaskManager(_) => {}
@@ -299,6 +301,7 @@ impl Window {
             WindowContent::Files(files) => files.handle_click(x, y),
             WindowContent::Store(store) => store.handle_click(x, y),
             WindowContent::Calculator(calc) => calc.handle_click(x, y),
+            WindowContent::Browser(browser) => browser.handle_click(x, y),
             WindowContent::Terminal(_)
             | WindowContent::Notes(_)
             | WindowContent::TaskManager(_)
@@ -337,6 +340,7 @@ impl Window {
             WindowContent::Calculator(_) => b"Calculator",
             WindowContent::TaskManager(_) => b"Task Manager",
             WindowContent::MoonAi(_) => b"Moon AI",
+            WindowContent::Browser(_) => b"Browser",
         }
     }
 
@@ -423,6 +427,7 @@ impl Window {
             WindowContent::Calculator(calc) => calc.render(dx, content_y, dw, dh),
             WindowContent::TaskManager(tm) => tm.render(dx, content_y, dw, dh),
             WindowContent::MoonAi(ai) => ai.render(dx, content_y, dw, dh),
+            WindowContent::Browser(browser) => browser.render(dx, content_y, dw, dh),
         }
 
         // A brief fade-in/fade-out overlay layered on top of the geometry
