@@ -1,9 +1,12 @@
 //! A from-scratch, minimal network stack: Ethernet framing, ARP, IPv4,
-//! ICMP, UDP, a client-only TCP (`tcp`, `http`), a DHCP client, and a
+//! ICMP, UDP, a client-only TCP (`tcp`, `http`), a client-only TLS 1.3
+//! (`tls`, backing `http`'s `https://` support), a DHCP client, and a
 //! best-effort DNS resolver. `tcp` is deliberately scoped to one
 //! request/response at a time, no retransmission/congestion control -- a
 //! general-purpose TCP (RFC 9293) is a much larger project on its own; see
 //! that module's doc comment for exactly what it does and doesn't handle.
+//! `tls` has its own, more serious honest gap documented in its module
+//! comment: real encryption, no certificate authentication.
 //!
 //! Everything here is poll-driven rather than interrupt-driven, same choice
 //! as the AHCI driver: `poll_once()` tries to receive and dispatch a single
@@ -20,6 +23,7 @@ pub mod http;
 pub mod icmp;
 pub mod ipv4;
 pub mod tcp;
+pub mod tls;
 pub mod udp;
 
 use crate::drivers::rtl8139::Rtl8139;
@@ -198,6 +202,19 @@ pub fn run_demo() {
             resp.body.len()
         ),
         Err(err) => crate::serial_println!("net: HTTP GET example.com/ failed: {:?}", err),
+    }
+
+    // The same, but through a real TLS 1.3 handshake -- proves the crypto
+    // (X25519/HKDF/ChaCha20-Poly1305) actually interoperates with a real
+    // server's TLS stack, not just against itself. See `tls`'s doc comment
+    // for what "real" stops meaning here (no certificate authentication).
+    match http::fetch("https://example.com/") {
+        Ok(resp) => crate::serial_println!(
+            "net: HTTPS GET example.com/ -> status {} ({} bytes)",
+            resp.status,
+            resp.body.len()
+        ),
+        Err(err) => crate::serial_println!("net: HTTPS GET example.com/ failed: {:?}", err),
     }
 }
 

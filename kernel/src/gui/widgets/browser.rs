@@ -1,16 +1,19 @@
 //! A real, minimal web browser: types a URL, resolves it via real DNS,
-//! opens a real TCP connection, sends a real HTTP/1.1 GET (`crate::net::http`),
-//! and renders whatever text the server actually sent back -- a genuine
-//! fetch over the wire, not a canned demo page.
+//! opens a real TCP (or, for `https://`, a real TLS 1.3) connection, sends
+//! a real HTTP/1.1 GET (`crate::net::http`), and renders whatever text the
+//! server actually sent back -- a genuine fetch over the wire, not a
+//! canned demo page.
 //!
-//! Honest scope: plain HTTP only (no HTTPS -- there's no TLS in this
-//! kernel), and rendering is "strip HTML tags to plain text," not a real
+//! Honest scope: rendering is "strip HTML tags to plain text," not a real
 //! layout/CSS engine -- moon OS has no DOM, no CSS box model, no image
 //! decoder wired into this widget, no JavaScript. That's a deliberate,
 //! documented line: a genuine HTML renderer is a project on the scale of
-//! the whole GUI again. What's real is everything below the tag-stripping:
-//! the network round-trip, and the fact that the text on screen is the
-//! actual bytes a real server sent for the actual URL typed in.
+//! the whole GUI again. `https://` support has its own, more serious
+//! honest gap: see `net::tls`'s module doc comment -- real encryption,
+//! but no certificate chain-of-trust validation, so this is not secure
+//! against an active attacker. What's real: the network round-trip, and
+//! the fact that the text on screen is the actual bytes a real server
+//! sent for the actual URL typed in.
 //!
 //! `fetch()` blocks the whole UI while the request is in flight -- this
 //! kernel's network stack is synchronous/poll-driven end to end (see
@@ -57,9 +60,8 @@ impl BrowserState {
 
     fn fetch(&mut self) {
         let cols = ((self.content_w.get() as i32 - 8) / 8).max(1) as usize;
-        let (host, path) = split_url(&self.url);
-        self.status = format!("connecting to {host}...");
-        match http::get(host, path) {
+        self.status = format!("connecting to {}...", &self.url);
+        match http::fetch(&self.url) {
             Ok(resp) => {
                 let text = http::body_text(&resp);
                 let stripped = strip_html(&text);
@@ -172,20 +174,6 @@ impl BrowserState {
 impl Default for BrowserState {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-/// Splits `"host/path"` or `"http://host/path"` into `(host, path)` --
-/// path defaults to `"/"` when omitted. No query-string/fragment special
-/// handling beyond just passing them through as part of the path.
-fn split_url(url: &str) -> (&str, &str) {
-    let rest = url
-        .strip_prefix("http://")
-        .or_else(|| url.strip_prefix("https://"))
-        .unwrap_or(url);
-    match rest.find('/') {
-        Some(idx) => (&rest[..idx], &rest[idx..]),
-        None => (rest, "/"),
     }
 }
 

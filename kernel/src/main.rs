@@ -10,6 +10,7 @@ extern crate alloc;
 mod apk;
 mod arch;
 mod audio;
+mod crypto;
 mod drivers;
 mod elf;
 mod font;
@@ -218,6 +219,7 @@ extern "C" fn kmain() -> ! {
 
     inspect_apk_test_fixture();
     zip_self_test();
+    crypto::self_test();
 
     crate::serial_println!("scheduler: {} task(s) spawned", sched::task_count());
 

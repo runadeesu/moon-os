@@ -124,6 +124,13 @@ pub struct TcpStream {
     remote_port: u16,
     seq: u32,
     ack: u32,
+    /// Bytes received and ACKed but not yet consumed by the caller --
+    /// `read_exact`/`read_to_end` both drain from here, so TLS can read a
+    /// record header, learn its length, then read exactly that many more
+    /// bytes, instead of only ever being able to block until the whole
+    /// connection closes.
+    recv_buffer: Vec<u8>,
+    peer_closed: bool,
 }
 
 /// Opens a TCP connection via the real three-way handshake, blocking
@@ -170,6 +177,8 @@ pub fn connect(remote_ip: Ipv4Addr, remote_port: u16) -> Option<TcpStream> {
         remote_port,
         seq,
         ack,
+        recv_buffer: Vec::new(),
+        peer_closed: false,
     })
 }
 
@@ -192,17 +201,17 @@ impl TcpStream {
         true
     }
 
-    /// Reads segments until the peer sends FIN (or we time out), ACKing
-    /// each one and politely closing our side back once the peer's FIN
-    /// arrives. Out-of-order segments are dropped rather than reassembled
-    /// -- acceptable for a small HTTP response arriving over a local NAT
-    /// link, not a general answer to real-world reordering/loss.
-    pub fn read_to_end(&mut self) -> Vec<u8> {
-        let mut body = Vec::new();
-        for _ in 0..POLL_SPIN_LIMIT {
+    /// Pulls any newly-arrived, in-order segments into `recv_buffer`,
+    /// ACKing each one; sees and handles the peer's FIN (closing our side
+    /// back, and recording `peer_closed`) but doesn't block waiting for
+    /// anything -- a single non-blocking drain of whatever's already
+    /// arrived. Out-of-order segments are dropped rather than reassembled,
+    /// same honest limitation as the rest of this client.
+    fn drain_available(&mut self) {
+        loop {
             super::poll_once();
             let Some(seg) = INBOX.lock().take() else {
-                continue;
+                return;
             };
             if seg.seq != self.ack {
                 continue; // out-of-order or duplicate; no reorder buffer
@@ -214,7 +223,7 @@ impl TcpStream {
                 dst_port: self.remote_port,
             };
             if !seg.payload.is_empty() {
-                body.extend_from_slice(&seg.payload);
+                self.recv_buffer.extend_from_slice(&seg.payload);
                 self.ack = self.ack.wrapping_add(seg.payload.len() as u32);
                 let ack_seg = build_segment(&ep, self.seq, self.ack, FLAG_ACK, &[]);
                 super::ipv4::send(self.remote_ip, super::ipv4::PROTO_TCP, &ack_seg);
@@ -224,10 +233,40 @@ impl TcpStream {
                 let close = build_segment(&ep, self.seq, self.ack, FLAG_FIN | FLAG_ACK, &[]);
                 super::ipv4::send(self.remote_ip, super::ipv4::PROTO_TCP, &close);
                 self.seq = self.seq.wrapping_add(1);
-                break;
+                self.peer_closed = true;
+                return;
             }
         }
-        body
+    }
+
+    /// Blocks (bounded) until at least `n` bytes are available, then
+    /// removes and returns exactly `n` of them. `None` if the peer closes
+    /// first without ever delivering that many.
+    pub fn read_exact(&mut self, n: usize) -> Option<Vec<u8>> {
+        for _ in 0..POLL_SPIN_LIMIT {
+            if self.recv_buffer.len() >= n {
+                let rest = self.recv_buffer.split_off(n);
+                let out = core::mem::replace(&mut self.recv_buffer, rest);
+                return Some(out);
+            }
+            if self.peer_closed {
+                return None;
+            }
+            self.drain_available();
+        }
+        None
+    }
+
+    /// Blocks (bounded) until the peer sends FIN, returning every byte
+    /// received (already-buffered plus whatever arrives while waiting).
+    pub fn read_to_end(&mut self) -> Vec<u8> {
+        for _ in 0..POLL_SPIN_LIMIT {
+            if self.peer_closed {
+                break;
+            }
+            self.drain_available();
+        }
+        core::mem::take(&mut self.recv_buffer)
     }
 }
 
