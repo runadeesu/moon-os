@@ -115,7 +115,7 @@ impl AppKind {
     fn default_size(self) -> (u32, u32) {
         match self {
             AppKind::Terminal => (460, 260),
-            AppKind::Settings => (300, 150),
+            AppKind::Settings => (300, 174),
             AppKind::Files => (420, 260),
             AppKind::Store => (420, 150),
             AppKind::Notes => (360, 260),
@@ -856,6 +856,31 @@ pub fn on_mouse(dx: i32, dy: i32, left: bool, right: bool, _middle: bool) {
                     if let Some(w) = gui.windows.get_mut(owner) {
                         w.content.handle_context_action(action);
                     }
+                }
+                gui.left_was_down = left;
+                gui.right_was_down = right;
+                drop(gui);
+                redraw();
+                return;
+            }
+        }
+
+        // The notification bell's dropdown: a click on its header row
+        // (category filter / Clear all) is handled here and consumed,
+        // before the taskbar's own click handling below (which is what
+        // actually opens/closes the panel via the bell icon).
+        if left && !gui.left_was_down && gui.notif_panel_open {
+            let panel_h = notifications::panel_height();
+            let panel_w = notifications::panel_width();
+            let panel_x = screen_w as i32 - 16 - panel_w;
+            let panel_y = taskbar::bar_top(screen_h) - 8 - panel_h;
+            if (panel_x..panel_x + panel_w).contains(&cx)
+                && (panel_y..panel_y + panel_h).contains(&cy)
+            {
+                match notifications::header_hit(cx - panel_x, cy - panel_y) {
+                    Some(true) => notifications::cycle_category_filter(),
+                    Some(false) => notifications::clear_history(),
+                    None => {}
                 }
                 gui.left_was_down = left;
                 gui.right_was_down = right;

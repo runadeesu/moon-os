@@ -117,10 +117,18 @@ pub fn installed() -> Vec<InstalledPackage> {
 /// of memory).
 pub fn run(file_name: &str) -> Result<String, String> {
     let result = run_inner(file_name);
-    use crate::gui::notifications::{push, Kind};
+    use crate::gui::notifications::{push, Category, Kind};
     match &result {
-        Ok(name) => push(Kind::Success, alloc::format!("launched {name}")),
-        Err(err) => push(Kind::Error, alloc::format!("launch failed: {err}")),
+        Ok(name) => push(
+            Kind::Success,
+            Category::Packages,
+            alloc::format!("launched {name}"),
+        ),
+        Err(err) => push(
+            Kind::Error,
+            Category::Packages,
+            alloc::format!("launch failed: {err}"),
+        ),
     }
     result
 }

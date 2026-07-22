@@ -1,16 +1,20 @@
-//! Moon Store: a local catalog of installed `.mapp` packages with search,
-//! a real description/category per package, and Launch/Uninstall actions
-//! that actually run or remove the package.
+//! Moon Store: a local catalog of installed `.mapp` packages with search, a
+//! category filter, a real description/category per package, and
+//! Launch/Uninstall actions that actually run or remove the package.
 //!
 //! Honest limitations, unchanged from before: there's no networked package
 //! repository, so "the store" and "what's installed" are still the same
 //! list -- installing something new means dropping a `.mapp` into RAMFS
-//! (currently only the two bundled packages exist). Star ratings, review
-//! counts, and a "featured/ranking" section are deliberately not here:
-//! with no real users submitting reviews, faking those numbers would be
-//! exactly the kind of dummy data this project avoids. Screenshots/icons
-//! are text-only (name + category) for the same reason -- there's no real
-//! image asset pipeline to draw from yet.
+//! (currently only the two bundled packages exist). That also means there's
+//! deliberately no download-progress bar: a real one would have nothing to
+//! measure (installs are an instant RAMFS write), and a fake one would be
+//! exactly the kind of dummy UI this project avoids -- see `net::http` /
+//! the Browser app for where real, slow, over-the-wire progress would
+//! actually belong once package downloads exist. Star ratings, review
+//! counts, and a "featured/ranking" section are deliberately not here for
+//! the same reason: with no real users submitting reviews, faking those
+//! numbers would be dummy data. Screenshots/icons are text-only (name +
+//! category) since there's no real image asset pipeline to draw from yet.
 
 use crate::framebuffer;
 use alloc::format;
@@ -48,6 +52,10 @@ pub struct StoreState {
     status: String,
     searching: bool,
     search: String,
+    /// Index into `categories()`; 0 always means "All". A real, working
+    /// filter over the actual categories present -- not a fixed dropdown of
+    /// categories that might not even have packages in them.
+    category_index: usize,
     /// Content-area width from the most recent `render()` call -- needed by
     /// `handle_click` to tell the `[Launch]`/`[Uninstall]` columns apart,
     /// since both are laid out relative to the right edge. Interior
@@ -62,8 +70,29 @@ impl StoreState {
             status: String::from("click a package to launch it"),
             searching: false,
             search: String::new(),
+            category_index: 0,
             content_w: Cell::new(0),
         }
+    }
+
+    /// `["All", ...every distinct category actually present, sorted]` --
+    /// computed from the real installed set each time, so it never lists a
+    /// category with nothing in it.
+    fn categories(&self) -> alloc::vec::Vec<&'static str> {
+        let mut cats: alloc::vec::Vec<&'static str> = crate::pkg::installed()
+            .iter()
+            .map(|p| describe(&p.name).0)
+            .collect();
+        cats.sort_unstable();
+        cats.dedup();
+        let mut out = alloc::vec!["All"];
+        out.extend(cats);
+        out
+    }
+
+    fn current_category(&self) -> &'static str {
+        let cats = self.categories();
+        cats[self.category_index % cats.len()]
     }
 
     fn filtered(&self) -> alloc::vec::Vec<crate::pkg::InstalledPackage> {
@@ -72,6 +101,19 @@ impl StoreState {
             let needle = self.search.to_ascii_lowercase();
             packages.retain(|p| p.name.to_ascii_lowercase().contains(&needle));
         }
+        let category = self.current_category();
+        if category != "All" {
+            packages.retain(|p| describe(&p.name).0 == category);
+        }
+        // Real, deterministic ordering (category, then name) -- not a
+        // popularity/ranking sort, since there's no real usage data to rank
+        // by.
+        packages.sort_by(|a, b| {
+            describe(&a.name)
+                .0
+                .cmp(describe(&b.name).0)
+                .then_with(|| a.name.cmp(&b.name))
+        });
         packages
     }
 
@@ -96,9 +138,14 @@ impl StoreState {
             return;
         }
         if y < LIST_TOP {
-            self.searching = !self.searching;
-            if !self.searching {
-                self.search.clear();
+            if x < 60 {
+                self.searching = !self.searching;
+                if !self.searching {
+                    self.search.clear();
+                }
+            } else {
+                let cats = self.categories();
+                self.category_index = (self.category_index + 1) % cats.len();
             }
             return;
         }
@@ -119,6 +166,7 @@ impl StoreState {
                 self.status = format!("uninstalled {}", pkg.name);
                 crate::gui::notifications::push(
                     crate::gui::notifications::Kind::Info,
+                    crate::gui::notifications::Category::Packages,
                     self.status.clone(),
                 );
             }
@@ -161,6 +209,13 @@ impl StoreState {
                     None,
                 );
             }
+            c.draw_str_at(
+                x + w as i32 - 120,
+                y + HEADER_H + 2,
+                &format!("Category: {}", self.current_category()),
+                neon,
+                None,
+            );
 
             for (row, pkg) in packages.iter().enumerate() {
                 let row_y = y + LIST_TOP + row as i32 * ROW_H;

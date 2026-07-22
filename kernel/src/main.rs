@@ -396,6 +396,7 @@ fn install_bundled_packages() {
     crate::serial_println!("pkg: installed 2 bundled package(s) into /apps");
     gui::notifications::push(
         gui::notifications::Kind::Success,
+        gui::notifications::Category::Packages,
         String::from("installed 2 bundled package(s)"),
     );
 }

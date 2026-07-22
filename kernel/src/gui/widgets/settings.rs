@@ -1,11 +1,15 @@
 //! A settings/system-info widget: live memory, scheduler, and uptime
 //! stats, plus what's actually configurable -- UI language (`crate::i18n`),
 //! the accent color (`super::super::theme`), mouse sensitivity
-//! (`super::super::mouse_speed`), and real power actions (reboot/shutdown,
-//! `crate::power`) -- each changed/triggered by clicking its row.
-//! Network/Bluetooth/account/privacy panels aren't here because there's no
-//! real subsystem behind them yet -- adding toggles for those would just be
-//! decoration, not settings.
+//! (`super::super::mouse_speed`), a real network status line (actual
+//! DHCP-leased IP or "no lease", `crate::net`), Do Not Disturb for
+//! notification toasts (`super::super::notifications`), and real power
+//! actions (reboot/shutdown, `crate::power`) -- each changed/triggered by
+//! clicking its row. Bluetooth/battery/account panels still aren't here:
+//! `crate::drivers::bluetooth`/`crate::power::battery_status` only ever
+//! have one honest answer to report ("not detected"/"no battery"), and
+//! there's no real account system beyond the login screen's `/etc/passwd`
+//! yet -- a settings row for either would just be decoration.
 
 use crate::framebuffer;
 use crate::i18n::{self, Key};
@@ -19,7 +23,9 @@ const UPTIME_Y: i32 = TASKS_Y + ROW_H;
 const LANG_Y: i32 = UPTIME_Y + ROW_H + 6;
 const ACCENT_Y: i32 = LANG_Y + ROW_H;
 const MOUSE_Y: i32 = ACCENT_Y + ROW_H;
-const HINT_Y: i32 = MOUSE_Y + ROW_H;
+const NETWORK_Y: i32 = MOUSE_Y + ROW_H;
+const DND_Y: i32 = NETWORK_Y + ROW_H;
+const HINT_Y: i32 = DND_Y + ROW_H;
 const POWER_Y: i32 = HINT_Y + ROW_H + 6;
 
 pub struct SettingsState;
@@ -37,6 +43,8 @@ impl SettingsState {
             super::super::theme::cycle_accent();
         } else if (MOUSE_Y - 2..MOUSE_Y + ROW_H).contains(&y) {
             super::super::mouse_speed::cycle();
+        } else if (DND_Y - 2..DND_Y + ROW_H).contains(&y) {
+            super::super::notifications::toggle_dnd();
         } else if (POWER_Y - 2..POWER_Y + ROW_H).contains(&y) {
             if x < 90 {
                 crate::power::reboot();
@@ -124,6 +132,35 @@ impl SettingsState {
                 (0x14, 0x2A, 0x36),
             );
             c.draw_str_at(x + 6, y + MOUSE_Y, &mouse_line, accent, None);
+
+            let network_line = if crate::net::is_up() {
+                let ip = crate::net::our_ip();
+                if ip == crate::net::UNSPECIFIED_IP {
+                    alloc::string::String::from("Network: no lease")
+                } else {
+                    alloc::format!("Network: {}", crate::net::format_ip(ip))
+                }
+            } else {
+                alloc::string::String::from("Network: no NIC")
+            };
+            c.draw_str_at(
+                x + 6,
+                y + NETWORK_Y,
+                &network_line,
+                (0x90, 0x94, 0xA0),
+                None,
+            );
+
+            let dnd_on = super::super::notifications::dnd_enabled();
+            let dnd_line = alloc::format!("Do Not Disturb: {}", if dnd_on { "On" } else { "Off" });
+            c.fill_rect(
+                x + 2,
+                y + DND_Y - 2,
+                w - 4,
+                (ROW_H + 2) as u32,
+                (0x14, 0x2A, 0x36),
+            );
+            c.draw_str_at(x + 6, y + DND_Y, &dnd_line, accent, None);
 
             c.draw_glyphs_at(
                 x + 6,

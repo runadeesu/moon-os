@@ -407,6 +407,7 @@ impl FileManagerState {
                         self.status = format!("moved {} to Trash", file_name(&path));
                         crate::gui::notifications::push(
                             crate::gui::notifications::Kind::Info,
+                            crate::gui::notifications::Category::Files,
                             self.status.clone(),
                         );
                     }
@@ -511,6 +512,7 @@ impl FileManagerState {
                         );
                         crate::gui::notifications::push(
                             crate::gui::notifications::Kind::Success,
+                            crate::gui::notifications::Category::Files,
                             self.status.clone(),
                         );
                     }
@@ -547,6 +549,7 @@ impl FileManagerState {
                                     };
                                     crate::gui::notifications::push(
                                         crate::gui::notifications::Kind::Success,
+                                        crate::gui::notifications::Category::Files,
                                         self.status.clone(),
                                     );
                                 }
