@@ -1,21 +1,25 @@
 //! A from-scratch, minimal network stack: Ethernet framing, ARP, IPv4,
-//! ICMP, UDP, a DHCP client, and a best-effort DNS resolver. No TCP yet --
-//! a real state machine with retransmission and congestion control is a
-//! much larger project, left for a follow-up milestone (see ROADMAP.md).
+//! ICMP, UDP, a client-only TCP (`tcp`, `http`), a DHCP client, and a
+//! best-effort DNS resolver. `tcp` is deliberately scoped to one
+//! request/response at a time, no retransmission/congestion control -- a
+//! general-purpose TCP (RFC 9293) is a much larger project on its own; see
+//! that module's doc comment for exactly what it does and doesn't handle.
 //!
 //! Everything here is poll-driven rather than interrupt-driven, same choice
 //! as the AHCI driver: `poll_once()` tries to receive and dispatch a single
 //! frame, and anything waiting on a reply (ARP resolution, a DHCP lease, a
-//! DNS answer) just calls it in a bounded loop. That keeps the whole stack
-//! synchronous and easy to reason about, at the cost of not being able to
-//! do anything else while waiting -- fine for what this milestone needs to
-//! prove.
+//! DNS answer, a TCP handshake/response) just calls it in a bounded loop.
+//! That keeps the whole stack synchronous and easy to reason about, at the
+//! cost of not being able to do anything else while waiting -- fine for
+//! what this milestone needs to prove.
 
 pub mod arp;
 pub mod dhcp;
 pub mod dns;
+pub mod http;
 pub mod icmp;
 pub mod ipv4;
+pub mod tcp;
 pub mod udp;
 
 use crate::drivers::rtl8139::Rtl8139;
@@ -88,6 +92,10 @@ pub fn our_ip() -> Ipv4Addr {
 
 pub fn gateway() -> Ipv4Addr {
     NET.lock().gateway
+}
+
+pub fn subnet_mask() -> Ipv4Addr {
+    NET.lock().subnet_mask
 }
 
 pub fn dns_server() -> Ipv4Addr {
@@ -178,6 +186,18 @@ pub fn run_demo() {
         None => crate::serial_println!(
             "net: DNS query timed out (needs real internet from the host; DHCP/ping above don't)"
         ),
+    }
+
+    // A real TCP handshake + HTTP GET, end to end -- proves `tcp`/`http`
+    // work against an actual server, not just against each other. Same
+    // "needs real internet from the host" caveat as the DNS query above.
+    match http::get("example.com", "/") {
+        Ok(resp) => crate::serial_println!(
+            "net: HTTP GET example.com/ -> status {} ({} bytes)",
+            resp.status,
+            resp.body.len()
+        ),
+        Err(err) => crate::serial_println!("net: HTTP GET example.com/ failed: {:?}", err),
     }
 }
 
