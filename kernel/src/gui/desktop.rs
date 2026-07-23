@@ -129,6 +129,40 @@ fn draw_cloud(c: &mut framebuffer::Console, x: i32, y: i32, scale: i32, color: (
     }
 }
 
+/// A periodic shooting star: a bright head with a short fading trail,
+/// streaking diagonally across the upper sky. Fully deterministic from
+/// `ticks` (same "no `rand` crate, animate from the real tick counter"
+/// approach as the rest of this file's animation) -- one streak appears
+/// every `CYCLE` ticks, its start point/angle varying per cycle via a
+/// cheap integer hash so it isn't the same streak every time, then it's
+/// gone until the next cycle.
+fn draw_shooting_star(c: &mut framebuffer::Console, sw: i32, sh: i32, ticks: u64) {
+    const CYCLE: u64 = 420;
+    const ACTIVE: u64 = 45;
+    let phase = ticks % CYCLE;
+    if phase >= ACTIVE {
+        return;
+    }
+    let cycle_idx = ticks / CYCLE;
+    let seed = cycle_idx.wrapping_mul(2_654_435_761) as i32;
+    let start_x = (seed.rem_euclid(sw.max(1) * 2 / 3)) + sw / 6;
+    let start_y = (seed / 7).rem_euclid((sh / 5).max(1));
+
+    let progress = phase as i32;
+    let head_x = start_x + progress * 7;
+    let head_y = start_y + progress * 3;
+
+    for t in 0..14i32 {
+        let tx = head_x - t * 6;
+        let ty = head_y - t * 3;
+        let alpha = (210 - t * 15).max(0) as u8;
+        if alpha == 0 {
+            break;
+        }
+        c.blend_rect(tx, ty, 2, 2, (0xFF, 0xFF, 0xF2), alpha);
+    }
+}
+
 pub fn render(stars: &[Star], screen_w: usize, screen_h: usize, ticks: u64) {
     let sw = screen_w as i32;
     let sh = screen_h as i32;
@@ -170,7 +204,9 @@ pub fn render(stars: &[Star], screen_w: usize, screen_h: usize, ticks: u64) {
 
     if style == 1 {
         // Aurora bands: a few overlapping translucent horizontal waves that
-        // drift sideways, standing in for the mountains/clouds layers below.
+        // drift sideways. Each band is drawn as several adjacent rows at
+        // falling alpha (instead of one flat 3px stripe) so it reads as a
+        // soft glowing ribbon rather than a hard-edged line.
         framebuffer::with(|c| {
             for band in 0..3 {
                 let color = match band {
@@ -181,10 +217,16 @@ pub fn render(stars: &[Star], screen_w: usize, screen_h: usize, ticks: u64) {
                 for x in 0..sw {
                     let wave = ridge_height(x, (ticks / 6) as i32 + band * 200, 260, 40);
                     let y = sh / 4 + band * 30 + wave - 20;
-                    c.blend_rect(x, y, 1, 3, color, 90);
+                    for (dy, alpha) in [(0i32, 100u8), (1, 70), (2, 45), (3, 45), (4, 70), (5, 100)] {
+                        c.blend_rect(x, y + dy, 1, 1, color, alpha);
+                    }
                 }
             }
         });
+    }
+
+    if night > 60 && style != 2 {
+        framebuffer::with(|c| draw_shooting_star(c, sw, sh, ticks));
     }
 
     // The sun/moon sweeps left-to-right across the sky over its half of the

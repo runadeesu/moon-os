@@ -1472,7 +1472,7 @@ fn render_context_menu(menu: &ContextMenu) {
     let h = menu.items.len() as u32 * MENU_ROW_H as u32;
     framebuffer::with(|c| {
         c.glow_border(menu.x, menu.y, MENU_W as u32, h, theme::accent());
-        c.blend_rect(menu.x, menu.y, MENU_W as u32, h, (0x14, 0x18, 0x24), 235);
+        c.frosted_glass_rect(menu.x, menu.y, MENU_W as u32, h, (0x14, 0x18, 0x24), 220);
         for (i, (label, _)) in menu.items.iter().enumerate() {
             let row_y = menu.y + i as i32 * MENU_ROW_H;
             c.draw_str_at(menu.x + 6, row_y + 4, label, (0xE0, 0xE0, 0xE0), None);

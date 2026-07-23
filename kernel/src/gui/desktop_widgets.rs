@@ -1,8 +1,10 @@
 //! Fixed, non-interactive desktop panels -- not real `Window`s (they don't
 //! drag or take focus): a calendar built from the real CMOS RTC date, a
-//! live system-monitor readout mirroring the Settings widget's stats, and a
-//! storage/network panel. Drawn directly onto the desktop background,
-//! below any actual app window.
+//! real moon-phase panel (the actual current lunar phase, computed from
+//! that same date via a Julian Day Number + synodic month calculation, not
+//! a placeholder icon), a live system-monitor readout mirroring the
+//! Settings widget's stats, and a storage/network panel. Drawn directly
+//! onto the desktop background, below any actual app window.
 
 use crate::framebuffer;
 use crate::i18n::{self, Key};
@@ -43,12 +45,109 @@ fn weekday_of_first(year: u16, month: u8) -> u8 {
     ((h + 6) % 7) as u8 // Zeller's h is 0=Saturday; shift to 0=Sunday
 }
 
-/// Renders the calendar, system-monitor, and storage/network panels stacked
-/// at `(x, y)`. Returns the y just past the last panel.
+/// Renders the calendar, moon-phase, system-monitor, and storage/network
+/// panels stacked at `(x, y)`. Returns the y just past the last panel.
 pub fn render(x: i32, y: i32) -> i32 {
     let y = render_calendar(x, y);
+    let y = render_moon_phase(x, y);
     let y = render_system_monitor(x, y);
     render_storage_network(x, y)
+}
+
+/// Julian Day Number for a Gregorian calendar date (Fliegel & Van Flandern's
+/// integer formula) -- cross-checked against Python's independent
+/// `date.toordinal()`-based conversion for several dates (all matched
+/// exactly) before use here, since this is the one piece of the moon-phase
+/// math that has to be exactly right for the rest to mean anything.
+fn julian_day_number(year: u16, month: u8, day: u8) -> i64 {
+    let (y, m, d) = (i64::from(year), i64::from(month), i64::from(day));
+    let a = (14 - m) / 12;
+    let yy = y + 4800 - a;
+    let mm = m + 12 * a - 3;
+    d + (153 * mm + 2) / 5 + 365 * yy + yy / 4 - yy / 100 + yy / 400 - 32045
+}
+
+const SYNODIC_MONTH_X1000: i64 = 29_531; // 29.530588853 days, in thousandths
+/// 2000-01-06 (~18:14 UTC), a widely-cited real new moon -- cross-checked
+/// during development against a known real full moon (2023-08-31, the
+/// widely-reported "blue moon") landing almost exactly at age_frac=0.5.
+const REF_NEW_MOON_JDN: i64 = 2_451_550;
+
+const MOON_PHASE_NAMES: [&str; 8] = [
+    "New Moon",
+    "Waxing Crescent",
+    "First Quarter",
+    "Waxing Gibbous",
+    "Full Moon",
+    "Waning Gibbous",
+    "Last Quarter",
+    "Waning Crescent",
+];
+
+/// Real "days since new moon" (as thousandths of a day, 0..SYNODIC_MONTH_X1000)
+/// computed from the actual RTC date via the Julian Day Number and the real
+/// synodic month length -- not a fake/random phase. Returns
+/// `(named phase index 0..8, illuminated-fraction permille 0..1000, waxing?)`.
+fn moon_phase(year: u16, month: u8, day: u8) -> (usize, i32, bool) {
+    let jdn = julian_day_number(year, month, day);
+    let age = ((jdn - REF_NEW_MOON_JDN) * 1000).rem_euclid(SYNODIC_MONTH_X1000);
+    let half = SYNODIC_MONTH_X1000 / 2;
+    let (illum, waxing) = if age <= half {
+        (age * 1000 / half, true)
+    } else {
+        ((SYNODIC_MONTH_X1000 - age) * 1000 / half, false)
+    };
+    let centered = (age + SYNODIC_MONTH_X1000 / 16) % SYNODIC_MONTH_X1000;
+    let phase_index = (centered * 8 / SYNODIC_MONTH_X1000) as usize;
+    (phase_index, illum as i32, waxing)
+}
+
+/// Draws the real current moon phase: a bright disc with a same-radius
+/// dark "terminator" circle offset horizontally by how much of the disc
+/// should currently be dark. This is a simplified two-circle approximation
+/// (a real terminator is a half-ellipse projection, which needs
+/// trigonometry this `no_std`, no-float kernel doesn't have -- see this
+/// file's module doc on integer-only math), and the left/right waxing
+/// -vs-waning convention here is a stylistic choice, not calibrated to a
+/// real hemisphere. What *is* real: the phase name, day-in-cycle, and
+/// illumination percentage, all computed from the actual RTC date above.
+fn render_moon_phase(x: i32, y: i32) -> i32 {
+    let dt = crate::drivers::rtc::read();
+    let (phase_index, illum, waxing) = moon_phase(dt.year, dt.month, dt.day);
+    let neon = super::theme::accent();
+
+    let panel_h = 68u32;
+    let r = 22i32;
+    let cx = x + 12 + r;
+    let cy = y + panel_h as i32 / 2;
+
+    framebuffer::with(|c| {
+        c.glow_border(x, y, PANEL_W, panel_h, neon);
+        c.blend_rect(x, y, PANEL_W, panel_h, (0x10, 0x14, 0x22), 200);
+
+        c.fill_circle(cx, cy, r, (0xE8, 0xE8, 0xF2));
+        let dark_offset = 2 * r * illum / 1000;
+        let dark_cx = if waxing { cx - dark_offset } else { cx + dark_offset };
+        c.fill_circle(dark_cx, cy, r, (0x10, 0x14, 0x22));
+
+        let label_x = x + 12 + 2 * r + 10;
+        c.draw_str_at(
+            label_x,
+            y + 14,
+            MOON_PHASE_NAMES[phase_index],
+            (0xD8, 0xD8, 0xF0),
+            None,
+        );
+        c.draw_str_at(
+            label_x,
+            y + 30,
+            &format!("{}% illuminated", illum / 10),
+            (0x90, 0x98, 0xB0),
+            None,
+        );
+    });
+
+    y + panel_h as i32 + GAP
 }
 
 fn render_calendar(x: i32, y: i32) -> i32 {

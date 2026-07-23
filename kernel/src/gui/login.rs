@@ -132,13 +132,17 @@ impl LoginState {
 
     /// Resets the screen for a fresh lock/unlock cycle -- clears whatever
     /// was typed and drops back to password-only Log In, but keeps
-    /// remembering which account was last active.
+    /// remembering which account was last active. Also locks
+    /// `crate::vault`: its key only ever lives in memory for the current
+    /// session, so a real lock genuinely makes the vault inaccessible
+    /// again until the next real login, not just the desktop.
     pub fn lock(&mut self) {
         self.username.clear();
         self.password.clear();
         self.username_focused = false;
         self.mode = Mode::LogIn;
         self.error = None;
+        crate::vault::lock();
     }
 }
 
@@ -184,6 +188,9 @@ fn submit(state: &mut LoginState) -> bool {
         Mode::LogIn => {
             let user = state.display_user().to_string();
             let ok = check_login(&user, &state.password);
+            if ok {
+                crate::vault::unlock(&user, &state.password);
+            }
             state.password.clear();
             if ok {
                 state.error = None;
@@ -196,6 +203,7 @@ fn submit(state: &mut LoginState) -> bool {
         Mode::SwitchUser => {
             let ok = check_login(&state.username, &state.password);
             if ok {
+                crate::vault::unlock(&state.username, &state.password);
                 state.current_user = state.username.clone();
                 state.username.clear();
                 state.password.clear();
@@ -210,6 +218,7 @@ fn submit(state: &mut LoginState) -> bool {
         }
         Mode::SignUp => match create_account(&state.username, &state.password) {
             Ok(()) => {
+                crate::vault::unlock(&state.username, &state.password);
                 state.current_user = state.username.clone();
                 state.username.clear();
                 state.password.clear();

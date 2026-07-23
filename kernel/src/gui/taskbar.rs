@@ -285,7 +285,10 @@ pub fn render(
     let top = bar_top(screen_h);
 
     framebuffer::with(|c| {
-        c.blend_rect(0, top, screen_w as u32, HEIGHT, (0x0A, 0x0C, 0x18), 220);
+        // A real frosted-glass bar: blurs whatever's actually behind it
+        // (the wallpaper, or windows already drawn this frame) rather than
+        // just laying a flat tint over it.
+        c.frosted_glass_rect(0, top, screen_w as u32, HEIGHT, (0x0A, 0x0C, 0x18), 190);
         c.blend_rect(0, top - 1, screen_w as u32, 1, neon, 130);
         c.blend_rect(0, top - 2, screen_w as u32, 1, neon, 55);
 
@@ -330,7 +333,7 @@ pub fn render(
         let ry = top - h;
         framebuffer::with(|c| {
             c.glow_border(sx, ry, SEARCH_W as u32, h as u32, neon);
-            c.blend_rect(sx, ry, SEARCH_W as u32, h as u32, (0x12, 0x16, 0x22), 235);
+            c.frosted_glass_rect(sx, ry, SEARCH_W as u32, h as u32, (0x12, 0x16, 0x22), 210);
             for (i, (kind, label)) in search_results.iter().enumerate() {
                 let row_y = ry + i as i32 * SEARCH_ROW_H;
                 let tag = match kind {

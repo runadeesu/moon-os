@@ -206,7 +206,7 @@ pub fn render(x_right: i32, top: i32) {
 
         framebuffer::with(|c| {
             c.glow_border(x, y, WIDTH, HEIGHT as u32, color);
-            c.blend_rect(x, y, WIDTH, HEIGHT as u32, (0x0E, 0x12, 0x1E), alpha);
+            c.frosted_glass_rect(x, y, WIDTH, HEIGHT as u32, (0x0E, 0x12, 0x1E), alpha);
             c.fill_rect(x, y, 4, HEIGHT as u32, color);
 
             let max_chars = ((WIDTH as i32 - 20) / 8).max(1) as usize;
@@ -264,7 +264,7 @@ pub fn render_history_panel(x_right: i32, bottom: i32) {
 
     framebuffer::with(|c| {
         c.glow_border(x, y, HISTORY_PANEL_W, h as u32, neon);
-        c.blend_rect(x, y, HISTORY_PANEL_W, h as u32, (0x12, 0x16, 0x22), 240);
+        c.frosted_glass_rect(x, y, HISTORY_PANEL_W, h as u32, (0x12, 0x16, 0x22), 215);
 
         let filter_label = match category_filter() {
             None => alloc::string::String::from("Category: All"),

@@ -371,6 +371,112 @@ impl Console {
         }
     }
 
+    /// Opaque rounded-rect fill: a full-width middle band plus, for each of
+    /// the top `radius` rows (mirrored at the bottom), the horizontal inset
+    /// a circle of that radius has at that height -- the same per-scanline
+    /// integer-sqrt math `fill_circle` uses, just applied to a rect's four
+    /// corners instead of a whole disc.
+    pub fn fill_rounded_rect(&mut self, x: i32, y: i32, w: u32, h: u32, radius: i32, color: (u8, u8, u8)) {
+        let r = radius.max(0).min((w as i32).min(h as i32) / 2);
+        if r == 0 {
+            self.fill_rect(x, y, w, h, color);
+            return;
+        }
+        self.fill_rect(x, y + r, w, h.saturating_sub(2 * r as u32), color);
+        for dy in 0..r {
+            let half = isqrt((r * r - (r - dy) * (r - dy)) as i64) as i32;
+            let dx = r - half;
+            let row_w = w as i32 - 2 * dx;
+            if row_w > 0 {
+                self.fill_rect(x + dx, y + dy, row_w as u32, 1, color);
+                self.fill_rect(x + dx, y + h as i32 - dy - 1, row_w as u32, 1, color);
+            }
+        }
+    }
+
+    /// The translucent counterpart to `fill_rounded_rect`, built the same
+    /// way but blending each row instead of overwriting it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn blend_rounded_rect(
+        &mut self,
+        x: i32,
+        y: i32,
+        w: u32,
+        h: u32,
+        radius: i32,
+        color: (u8, u8, u8),
+        alpha: u8,
+    ) {
+        let r = radius.max(0).min((w as i32).min(h as i32) / 2);
+        if r == 0 {
+            self.blend_rect(x, y, w, h, color, alpha);
+            return;
+        }
+        self.blend_rect(x, y + r, w, h.saturating_sub(2 * r as u32), color, alpha);
+        for dy in 0..r {
+            let half = isqrt((r * r - (r - dy) * (r - dy)) as i64) as i32;
+            let dx = r - half;
+            let row_w = w as i32 - 2 * dx;
+            if row_w > 0 {
+                self.blend_rect(x + dx, y + dy, row_w as u32, 1, color, alpha);
+                self.blend_rect(x + dx, y + h as i32 - dy - 1, row_w as u32, 1, color, alpha);
+            }
+        }
+    }
+
+    /// A real (if cheap) "frosted glass" panel: reads whatever is actually
+    /// already drawn in `back` under this rect -- the wallpaper, or
+    /// whatever windows were drawn earlier this frame -- and box-blurs it
+    /// by overwriting each small `CELL`-sized block with the average color
+    /// sampled from that block's four corners, then blends `tint` on top.
+    /// This is a genuine blur of genuine on-screen content (not a flat
+    /// tinted rectangle pretending to be glass), just a coarse one: a
+    /// software renderer with no SIMD can't afford a real per-pixel
+    /// Gaussian convolution every frame, so the "blur" is a small number of
+    /// averaged blocks rather than a smooth falloff. Good enough at normal
+    /// viewing distance for the acrylic/glass panels this backs (title
+    /// bars, the taskbar, notification panels).
+    pub fn frosted_glass_rect(&mut self, x: i32, y: i32, w: u32, h: u32, tint: (u8, u8, u8), alpha: u8) {
+        const CELL: i32 = 6;
+        let x0 = x.max(0);
+        let y0 = y.max(0);
+        let x1 = (x + w as i32).min(self.width as i32);
+        let y1 = (y + h as i32).min(self.height as i32);
+        if x1 <= x0 || y1 <= y0 {
+            return;
+        }
+        let mut cy = y0;
+        while cy < y1 {
+            let cell_h = CELL.min(y1 - cy);
+            let mut cx = x0;
+            while cx < x1 {
+                let cell_w = CELL.min(x1 - cx);
+                let corners = [
+                    (cx, cy),
+                    (cx + cell_w - 1, cy),
+                    (cx, cy + cell_h - 1),
+                    (cx + cell_w - 1, cy + cell_h - 1),
+                ];
+                let mut sum = (0u32, 0u32, 0u32);
+                for (sx, sy) in corners {
+                    let p = self.get_pixel(sx as usize, sy as usize);
+                    sum.0 += u32::from(p.0);
+                    sum.1 += u32::from(p.1);
+                    sum.2 += u32::from(p.2);
+                }
+                let avg = (
+                    (sum.0 / corners.len() as u32) as u8,
+                    (sum.1 / corners.len() as u32) as u8,
+                    (sum.2 / corners.len() as u32) as u8,
+                );
+                self.fill_rect(cx, cy, cell_w as u32, cell_h as u32, avg);
+                cx += CELL;
+            }
+            cy += CELL;
+        }
+        self.blend_rect(x0, y0, (x1 - x0) as u32, (y1 - y0) as u32, tint, alpha);
+    }
+
     fn put_pixel(&mut self, x: usize, y: usize, color: u32) {
         if x >= self.width || y >= self.height {
             return;

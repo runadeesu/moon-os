@@ -17,6 +17,13 @@
 //! instead of silently doing nothing. `.mlnk` is this OS's own shortcut
 //! format (right-click "Create Shortcut") -- a real file holding a target
 //! path, resolved by recursing back into the same dispatch.
+//!
+//! Right-click "Encrypt to Vault"/"Decrypt from Vault" go through
+//! `crate::vault`: a real ChaCha20-Poly1305-encrypted directory keyed from
+//! the logged-in user's actual password (see that module's doc comment for
+//! the honest scope -- this is a password-protected vault, not whole-disk
+//! encryption). Double-clicking a vault `.enc` entry never silently
+//! decrypts it.
 
 use crate::gui::ContextMenu;
 use alloc::collections::{BTreeSet, VecDeque};
@@ -62,6 +69,8 @@ const ACTION_EXTRACT: u32 = 7;
 const ACTION_RUN: u32 = 8;
 const ACTION_SHORTCUT: u32 = 9;
 const ACTION_PROPERTIES: u32 = 10;
+const ACTION_VAULT_ENCRYPT: u32 = 11;
+const ACTION_VAULT_DECRYPT: u32 = 12;
 
 /// Dispatches a double-click (or a `.mlnk` shortcut's resolved target) to
 /// that file's real launch behavior. `.mapp`/`.exe` genuinely spawn a new
@@ -122,6 +131,10 @@ fn launch_path(path: &str) -> String {
         }
     } else if path.ends_with(".zip") {
         String::from("double-click won't extract a ZIP -- right-click it for Extract")
+    } else if path.starts_with(crate::vault::VAULT_DIR) && path.ends_with(".enc") {
+        String::from(
+            "encrypted vault entry -- right-click it for Decrypt from Vault (needs the correct login password)",
+        )
     } else {
         record_recent(path);
         format!("{} is not a launchable package", file_name(path))
@@ -440,13 +453,13 @@ impl FileManagerState {
             if self.has_parent_row() && r == 0 {
                 None
             } else {
-                self.row_path(r).map(|(p, _)| p.to_string())
+                self.row_path(r).map(|(p, d)| (p.to_string(), d))
             }
         });
-        self.context_target = target.clone();
+        self.context_target = target.as_ref().map(|(p, _)| p.clone());
 
         let mut items = Vec::new();
-        if let Some(t) = &target {
+        if let Some((t, is_dir)) = &target {
             if t.ends_with(".exe") || t.ends_with(".mapp") || t.ends_with(".mlnk") {
                 items.push((String::from("Run"), ACTION_RUN));
             }
@@ -459,6 +472,11 @@ impl FileManagerState {
             items.push((String::from("Compress to ZIP"), ACTION_COMPRESS));
             if t.ends_with(".zip") {
                 items.push((String::from("Extract"), ACTION_EXTRACT));
+            }
+            if !is_dir && t.starts_with(crate::vault::VAULT_DIR) && t.ends_with(".enc") {
+                items.push((String::from("Decrypt from Vault"), ACTION_VAULT_DECRYPT));
+            } else if !is_dir {
+                items.push((String::from("Encrypt to Vault"), ACTION_VAULT_ENCRYPT));
             }
         }
         if self.clipboard.is_some() {
@@ -478,6 +496,43 @@ impl FileManagerState {
             // File Manager on its own lock.
             if let Some(path) = self.context_target.take() {
                 self.status = launch_path(&path);
+            }
+            self.refresh();
+            return;
+        }
+        if action == ACTION_VAULT_ENCRYPT {
+            // Same reentrant-lock hazard as ACTION_RUN: `vault::write_file`
+            // locks `fs::root()` itself.
+            if let Some(path) = self.context_target.take() {
+                let bytes = crate::fs::root().lock().read(&path).map(|d| d.to_vec());
+                self.status = match bytes {
+                    Some(data) => {
+                        let name = file_name(&path).to_string();
+                        match crate::vault::write_file(&name, &data) {
+                            Ok(()) => format!("encrypted into vault as {name}"),
+                            Err(err) => format!("vault encrypt failed: {err}"),
+                        }
+                    }
+                    None => String::from("couldn't read that file"),
+                };
+            }
+            self.refresh();
+            return;
+        }
+        if action == ACTION_VAULT_DECRYPT {
+            if let Some(path) = self.context_target.take() {
+                let name = file_name(&path)
+                    .strip_suffix(".enc")
+                    .unwrap_or(file_name(&path))
+                    .to_string();
+                self.status = match crate::vault::read_file(&name) {
+                    Ok(data) => {
+                        let dest = format!("{}/{}", crate::gui::desktop_icons::HOME_DIR, name);
+                        crate::fs::root().lock().write(&dest, &data);
+                        format!("decrypted to {dest}")
+                    }
+                    Err(err) => format!("vault decrypt failed: {err}"),
+                };
             }
             self.refresh();
             return;
@@ -813,6 +868,8 @@ impl FileManagerState {
             (0xA8, 0xE0, 0x80)
         } else if name.ends_with(".mlnk") {
             (0xD0, 0xA8, 0xF0)
+        } else if name.ends_with(".enc") {
+            (0xF0, 0xD8, 0x60)
         } else if name.ends_with(".zip") {
             (0xE8, 0xC0, 0x60)
         } else if name.ends_with(".txt") {

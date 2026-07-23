@@ -373,12 +373,15 @@ impl Window {
             }
         });
 
+        const CORNER_RADIUS: i32 = 8;
         framebuffer::with(|c| {
             if focused {
                 c.glow_border(dx - 1, dy - 1, dw + 2, outer_h, neon);
             }
-            c.fill_rect(dx - 1, dy - 1, dw + 2, outer_h, border);
-            c.fill_rect(dx, dy, dw, TITLE_BAR_HEIGHT as u32, title_bg);
+            c.fill_rounded_rect(dx - 1, dy - 1, dw + 2, outer_h, CORNER_RADIUS, border);
+            // A real frosted-glass title bar: blurs the desktop/window
+            // content actually behind it rather than a flat tint.
+            c.frosted_glass_rect(dx, dy, dw, TITLE_BAR_HEIGHT as u32, title_bg, 200);
             c.draw_glyphs_at(dx + 4, dy + 5, self.title_bytes(), (0xFF, 0xFF, 0xFF), None);
 
             for (btn, bx, by) in Self::button_rects_at(dx, dy, dw) {

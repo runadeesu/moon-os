@@ -30,6 +30,7 @@ mod power;
 mod process;
 mod sched;
 mod syscall;
+mod vault;
 mod winexe;
 mod zip;
 
@@ -225,6 +226,7 @@ extern "C" fn kmain() -> ! {
     inspect_apk_test_fixture();
     zip_self_test();
     crypto::self_test();
+    vault::self_test();
 
     crate::serial_println!("scheduler: {} task(s) spawned", sched::task_count());
 
