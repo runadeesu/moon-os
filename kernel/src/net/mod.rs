@@ -1,12 +1,13 @@
 //! A from-scratch, minimal network stack: Ethernet framing, ARP, IPv4,
 //! ICMP, UDP, a client-only TCP (`tcp`, `http`), a client-only TLS 1.3
-//! (`tls`, backing `http`'s `https://` support), a DHCP client, and a
-//! best-effort DNS resolver. `tcp` is deliberately scoped to one
-//! request/response at a time, no retransmission/congestion control -- a
-//! general-purpose TCP (RFC 9293) is a much larger project on its own; see
-//! that module's doc comment for exactly what it does and doesn't handle.
-//! `tls` has its own, more serious honest gap documented in its module
-//! comment: real encryption, no certificate authentication.
+//! (`tls`, backing `http`'s `https://` support), a real WebDAV client
+//! (`webdav`, backing the File Manager's "Network Location" browsing), a
+//! DHCP client, and a best-effort DNS resolver. `tcp` is deliberately
+//! scoped to one request/response at a time, no retransmission/congestion
+//! control -- a general-purpose TCP (RFC 9293) is a much larger project on
+//! its own; see that module's doc comment for exactly what it does and
+//! doesn't handle. `tls` has its own, more serious honest gap documented
+//! in its module comment: real encryption, no certificate authentication.
 //!
 //! Everything here is poll-driven rather than interrupt-driven, same choice
 //! as the AHCI driver: `poll_once()` tries to receive and dispatch a single
@@ -25,6 +26,7 @@ pub mod ipv4;
 pub mod tcp;
 pub mod tls;
 pub mod udp;
+pub mod webdav;
 
 use crate::drivers::rtl8139::Rtl8139;
 use alloc::vec::Vec;
@@ -215,6 +217,20 @@ pub fn run_demo() {
             resp.body.len()
         ),
         Err(err) => crate::serial_println!("net: HTTPS GET example.com/ failed: {:?}", err),
+    }
+
+    // A real PROPFIND, over the same TCP connection machinery -- proves
+    // `http::request`'s general (arbitrary method/headers/body) path works
+    // end to end, not just the GET-only convenience wrappers above. Same
+    // "needs real internet, and this sandbox's egress allowlist blocks
+    // arbitrary hosts anyway" caveat as the HTTP/HTTPS demos.
+    match http::request("http://example.com/", "PROPFIND", &[("Depth", "1")], b"") {
+        Ok(resp) => crate::serial_println!(
+            "net: WebDAV PROPFIND example.com/ -> status {} ({} bytes)",
+            resp.status,
+            resp.body.len()
+        ),
+        Err(err) => crate::serial_println!("net: WebDAV PROPFIND example.com/ failed: {:?}", err),
     }
 }
 

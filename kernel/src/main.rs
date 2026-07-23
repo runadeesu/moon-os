@@ -31,6 +31,7 @@ mod process;
 mod sched;
 mod syscall;
 mod vault;
+mod wasm;
 mod winexe;
 mod zip;
 
@@ -227,6 +228,8 @@ extern "C" fn kmain() -> ! {
     zip_self_test();
     crypto::self_test();
     vault::self_test();
+    net::webdav::self_test();
+    wasm::self_test();
 
     crate::serial_println!("scheduler: {} task(s) spawned", sched::task_count());
 

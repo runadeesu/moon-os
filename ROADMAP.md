@@ -751,3 +751,57 @@ wrong-password rejected)` -- 実際に暗号化→復号のラウンドトリッ
 角丸ウィンドウ枠と、実データから計算された月齢ウィジェット
 ("First Quarter", "59% illuminated" -- 2026-07-23の実際の月相と一致)
 が正しく描画されていることを目視でも確認。build/clippyともに警告ゼロ。
+
+## 2026-07-23 追記(2): WebDAVクライアント + WebAssemblyインタプリタ
+
+同じ4方向の残り2つ、ネットワークサービス(WebDAV)とWebAssemblyランタイム
+を実装。
+
+**WebDAVクライアント (`kernel/src/net/webdav.rs`, `net/http.rs`拡張):**
+`net::http`にGET専用だった経路を一般化し、任意のHTTPメソッド/ヘッダー/
+ボディを送れる`http::request()`を追加(既存のTCP/TLS接続機構をそのまま
+再利用)。その上にPROPFIND(ディレクトリ一覧)/GET/PUT/MKCOL/DELETEを
+実装。PROPFINDのmultistatus XML応答は、本物の汎用XMLパーサではなく、
+WebDAV応答の浅く予測可能な構造(`<response>`ごとに`href`/`resourcetype`/
+`getcontentlength`/`displayname`)専用の、名前空間プレフィックス
+(`D:`/`d:`/なし)に寛容な小さなタグスキャナで読む -- 正直に「汎用
+XMLパーサではない」と明記。File Managerに`[Net]`トグルを追加し、
+実際のWebDAVサーバーをディレクトリのように閲覧・ダウンロードできる
+「Network Location」モードとして統合。
+
+テスト用のmultistatus XMLフィクスチャは、Pythonの`xml.etree.
+ElementTree`(本物の独立したXMLパーサ)で同じXMLをパースして得た
+href/is_dir/size/displaynameの値と完全一致することを確認してから
+Rust側のself-testに埋め込んだ。
+
+**WebAssemblyインタプリタ (`kernel/src/wasm.rs`):** ゼロから書いた、
+正直にスコープを絞った本物のWASMインタプリタ。WASMバイナリ形式
+(マジック/バージョン、Type/Function/Export/Codeセクション、本物の
+LEB128可変長整数)を解析し、i32算術/比較、ローカル変数、構造化制御フロー
+(block/loop/if/else/br/br_if/return)というスタックマシン命令セットを
+実行できる。ブロック/ループ/ifとendの対応関係は実行前に1回だけ事前解決
+しておき、`br`/`br_if`を安いテーブル参照に変換する設計。
+
+**正直な限界:** i32以外の数値型(i64/f32/f64、このカーネルには浮動小数点
+サポート自体が一切ない)、`call`/`call_indirect`(同一モジュール内の別
+関数呼び出しには非対応)、線形メモリ(`memory.load`/`memory.store`)、
+マルチバリューブロック、WASI相当のホストAPIは一切実装していない --
+「ほぼ完全なエンジン」ではなく、その一部分の、正直な最初のスライス。
+
+**検証方法(この部分が一番重要):** 実際に`clang --target=wasm32 -O1
+-nostdlib -Wl,--no-entry -Wl,--export=add -Wl,--export=fib`で本物の
+Cソースからコンパイルした`.wasm`モジュール(307バイト、本物のツール
+チェーン出力、手書きバイトコードではない)を使い、その同じバイト列を
+Node.jsのネイティブWebAssemblyエンジン(このインタプリタとコードを
+一切共有しない、完全に独立した実装)で実行して得た結果
+(add(3,4)=7, add(100,200)=300, fib(0)=0, fib(1)=1, fib(10)=55,
+fib(20)=6765)を「正解」として、Rust実装のself-testに埋め込んだ。
+
+QEMU実機で確認:
+```
+webdav: self-test passed (multistatus XML scanner matches independent ElementTree parse)
+wasm: self-test passed (real clang-compiled module, results match Node.js's WebAssembly engine)
+```
+実際に本物のCコンパイラが吐いた本物のWASMバイナリを、本物の独立した
+WebAssembly実装と同じ結果になるまで正しく解釈できていることを確認。
+build/clippyともに警告ゼロ。

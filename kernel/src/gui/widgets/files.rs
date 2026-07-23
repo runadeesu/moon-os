@@ -173,6 +173,13 @@ pub struct FileManagerState {
     /// "ghost icon following the cursor" while dragging -- the drop itself
     /// is a real move, just without that visual feedback mid-drag.
     drag_source: Option<usize>,
+    /// Browsing a real WebDAV server instead of local RAMFS -- toggled by
+    /// the toolbar's "[Net]" button. See `render_webdav`/`handle_webdav_click`.
+    webdav_mode: bool,
+    webdav_url: String,
+    webdav_editing: bool,
+    webdav_entries: Vec<crate::net::webdav::Entry>,
+    webdav_status: String,
 }
 
 fn file_name(path: &str) -> &str {
@@ -195,6 +202,11 @@ impl FileManagerState {
             grid_cols: Cell::new(1),
             showing_recent: false,
             drag_source: None,
+            webdav_mode: false,
+            webdav_url: String::new(),
+            webdav_editing: false,
+            webdav_entries: Vec::new(),
+            webdav_status: String::from("enter a WebDAV URL and press Enter"),
         };
         state.refresh();
         state
@@ -266,6 +278,20 @@ impl FileManagerState {
     }
 
     pub fn handle_char(&mut self, ch: u8) {
+        if self.webdav_mode && self.webdav_editing {
+            match ch {
+                b'\n' => {
+                    self.webdav_editing = false;
+                    self.webdav_fetch();
+                }
+                0x08 => {
+                    self.webdav_url.pop();
+                }
+                0x20..=0x7E => self.webdav_url.push(ch as char),
+                _ => {}
+            }
+            return;
+        }
         if !self.searching {
             return;
         }
@@ -286,6 +312,10 @@ impl FileManagerState {
     /// `x`/`y` are local to the widget's content area, same convention as
     /// `Window::handle_click`.
     pub fn handle_click(&mut self, x: i32, y: i32) {
+        if self.webdav_mode {
+            self.handle_webdav_click(x, y);
+            return;
+        }
         if y < HEADER_H {
             // Breadcrumb: click anywhere on the path bar to jump to root --
             // a full per-segment breadcrumb is more UI than this pass adds.
@@ -306,6 +336,12 @@ impl FileManagerState {
             } else if x < 230 {
                 self.showing_recent = !self.showing_recent;
                 self.refresh();
+            } else if x < 290 {
+                self.webdav_mode = true;
+                self.webdav_editing = true;
+                if self.webdav_url.is_empty() {
+                    self.webdav_url = String::from("http://");
+                }
             }
             return;
         }
@@ -763,6 +799,10 @@ impl FileManagerState {
     }
 
     pub fn render(&self, x: i32, y: i32, w: u32, h: u32) {
+        if self.webdav_mode {
+            self.render_webdav(x, y, w, h);
+            return;
+        }
         crate::framebuffer::with(|c| {
             c.fill_rect(x, y, w, h, (0x10, 0x10, 0x16));
 
@@ -798,9 +838,10 @@ impl FileManagerState {
                 (0x80, 0x80, 0x90)
             };
             c.draw_str_at(x + 162, y + HEADER_H + 2, "[Recent]", recent_color, None);
+            c.draw_str_at(x + 234, y + HEADER_H + 2, "[Net]", (0x80, 0x80, 0x90), None);
             if self.searching || !self.search.is_empty() {
                 c.draw_str_at(
-                    x + 230,
+                    x + 300,
                     y + HEADER_H + 2,
                     &format!("/{}_", self.search),
                     (0xE0, 0xE0, 0x60),
@@ -925,6 +966,127 @@ impl FileManagerState {
                 });
             }
         }
+    }
+
+    /// `scheme://host` from `url` -- WebDAV servers return `href`s as
+    /// absolute paths (e.g. `/webdav/sub`), so navigating into one means
+    /// combining this with the new path rather than resolving it as a
+    /// relative URL.
+    fn webdav_origin(url: &str) -> String {
+        let rest = url
+            .strip_prefix("https://")
+            .or_else(|| url.strip_prefix("http://"))
+            .unwrap_or(url);
+        let prefix_len = url.len() - rest.len();
+        let host_end = rest.find('/').unwrap_or(rest.len());
+        url[..prefix_len + host_end].to_string()
+    }
+
+    fn webdav_fetch(&mut self) {
+        self.webdav_status = format!("loading {}...", self.webdav_url);
+        match crate::net::webdav::list_dir(&self.webdav_url) {
+            Ok(entries) => {
+                self.webdav_status = format!("{} entries", entries.len());
+                self.webdav_entries = entries;
+            }
+            Err(err) => {
+                self.webdav_status = format!("failed: {err:?}");
+                self.webdav_entries.clear();
+            }
+        }
+    }
+
+    /// `x`/`y` local to the content area, same convention as `handle_click`.
+    fn handle_webdav_click(&mut self, _x: i32, y: i32) {
+        if y < HEADER_H {
+            // "[Local]" label doubles as the way back to RAMFS browsing.
+            self.webdav_mode = false;
+            self.webdav_editing = false;
+            self.refresh();
+            return;
+        }
+        if y < LIST_TOP {
+            self.webdav_editing = true;
+            return;
+        }
+        let row = (y - LIST_TOP) / ROW_H;
+        if row < 0 {
+            return;
+        }
+        let Some(entry) = self.webdav_entries.get(row as usize) else {
+            return;
+        };
+        if entry.is_dir {
+            self.webdav_url = format!("{}{}", Self::webdav_origin(&self.webdav_url), entry.href);
+            self.webdav_fetch();
+        } else {
+            let target = format!("{}{}", Self::webdav_origin(&self.webdav_url), entry.href);
+            self.webdav_status = format!("downloading {}...", entry.href);
+            match crate::net::webdav::get(&target) {
+                Ok(data) => {
+                    let name = file_name(&entry.href);
+                    let dest = format!("{}/{name}", crate::gui::desktop_icons::DOWNLOADS_DIR);
+                    crate::fs::root().lock().write(&dest, &data);
+                    self.webdav_status = format!("downloaded to {dest} ({} bytes)", data.len());
+                }
+                Err(err) => self.webdav_status = format!("download failed: {err:?}"),
+            }
+        }
+    }
+
+    fn render_webdav(&self, x: i32, y: i32, w: u32, h: u32) {
+        crate::framebuffer::with(|c| {
+            c.fill_rect(x, y, w, h, (0x10, 0x10, 0x16));
+            c.draw_str_at(
+                x + 4,
+                y + 4,
+                "[Local]  Network Location (WebDAV)",
+                (0x90, 0xC0, 0xFF),
+                None,
+            );
+            let bar_color = if self.webdav_editing {
+                crate::gui::theme::accent()
+            } else {
+                (0x40, 0x44, 0x50)
+            };
+            c.glow_border(x + 2, y + HEADER_H, w - 4, TOOLBAR_H as u32, bar_color);
+            let shown = if self.webdav_editing {
+                format!("{}_", self.webdav_url)
+            } else {
+                self.webdav_url.clone()
+            };
+            c.draw_str_at(x + 6, y + HEADER_H + 2, &shown, (0xE0, 0xE0, 0x60), None);
+        });
+
+        let list_y = y + LIST_TOP;
+        for (row, entry) in self.webdav_entries.iter().enumerate() {
+            let row_y = list_y + row as i32 * ROW_H;
+            if row_y + ROW_H > y + h as i32 {
+                break;
+            }
+            let color = if entry.is_dir {
+                (0x90, 0xC8, 0xFF)
+            } else {
+                (0xC0, 0xC0, 0xC0)
+            };
+            let label = entry
+                .name
+                .clone()
+                .unwrap_or_else(|| file_name(&entry.href).to_string());
+            let size_label = entry.size.map(|s| format!("{s} B"));
+            crate::framebuffer::with(|c| {
+                c.draw_str_at(x + 8, row_y, &label, color, None);
+                if let Some(size_label) = &size_label {
+                    c.draw_str_at(x + w as i32 - 80, row_y, size_label, (0x80, 0x80, 0x90), None);
+                }
+            });
+        }
+
+        let status_y = y + h as i32 - 12;
+        crate::framebuffer::with(|c| {
+            c.fill_rect(x, status_y - 2, w, 14, (0x08, 0x08, 0x0C));
+            c.draw_str_at(x + 4, status_y, &self.webdav_status, (0x80, 0x80, 0x90), None);
+        });
     }
 }
 

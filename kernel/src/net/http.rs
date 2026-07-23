@@ -1,9 +1,13 @@
-//! A minimal HTTP/1.1 client: GET only, one request per connection
-//! (`Connection: close`), no persistent connections, no pipelining. Plain
-//! HTTP runs directly over `net::tcp`; `https://` runs the exact same
+//! A minimal HTTP/1.1 client: one request per connection (`Connection:
+//! close`), no persistent connections, no pipelining. Plain HTTP runs
+//! directly over `net::tcp`; `https://` runs the exact same
 //! request/response logic over `net::tls`'s TLS 1.3 client instead -- see
 //! that module's doc comment for the honest, serious gap in what "https"
 //! means here (real encryption, no certificate authentication).
+//!
+//! `fetch`/`get`/`get_https` are GET-only, for the Browser app. [`request`]
+//! is the general form (arbitrary method, extra headers, a body) that
+//! `net::webdav`'s PROPFIND/PUT/MKCOL/DELETE are built on.
 
 use super::Ipv4Addr;
 use alloc::string::String;
@@ -26,17 +30,7 @@ pub enum FetchError {
 /// omitted, so a bare `example.com/path` typed into the Browser's address
 /// bar still works). This is the entry point `gui::widgets::browser` uses.
 pub fn fetch(url: &str) -> Result<Response, FetchError> {
-    let (https, rest) = if let Some(r) = url.strip_prefix("https://") {
-        (true, r)
-    } else if let Some(r) = url.strip_prefix("http://") {
-        (false, r)
-    } else {
-        (false, url)
-    };
-    let (host, path) = match rest.find('/') {
-        Some(idx) => (&rest[..idx], &rest[idx..]),
-        None => (rest, "/"),
-    };
+    let (https, host, path) = split_url(url);
     if https {
         get_https(host, path)
     } else {
@@ -68,6 +62,70 @@ fn request_bytes(host: &str, path: &str) -> String {
     alloc::format!(
         "GET {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: moonOS/1.0\r\nAccept: text/html,text/plain,*/*\r\nConnection: close\r\n\r\n"
     )
+}
+
+/// Splits a `http://`/`https://` (or bare, defaulting to `http`) URL into
+/// `(is_https, host, path)` -- the same scheme/host/path split `fetch`
+/// does, factored out so [`request`] can reuse it.
+fn split_url(url: &str) -> (bool, &str, &str) {
+    let (https, rest) = if let Some(r) = url.strip_prefix("https://") {
+        (true, r)
+    } else if let Some(r) = url.strip_prefix("http://") {
+        (false, r)
+    } else {
+        (false, url)
+    };
+    let (host, path) = match rest.find('/') {
+        Some(idx) => (&rest[..idx], &rest[idx..]),
+        None => (rest, "/"),
+    };
+    (https, host, path)
+}
+
+fn build_request(
+    method: &str,
+    host: &str,
+    path: &str,
+    extra_headers: &[(&str, &str)],
+    body: &[u8],
+) -> Vec<u8> {
+    let mut head = alloc::format!(
+        "{method} {path} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: moonOS/1.0\r\nConnection: close\r\nContent-Length: {}\r\n",
+        body.len()
+    );
+    for (key, value) in extra_headers {
+        head.push_str(&alloc::format!("{key}: {value}\r\n"));
+    }
+    head.push_str("\r\n");
+    let mut out = head.into_bytes();
+    out.extend_from_slice(body);
+    out
+}
+
+/// Issues an arbitrary HTTP/1.1 request -- any method, extra headers, and
+/// a body -- over a real TCP or TLS connection (scheme-dispatched the
+/// same way `fetch` is). What `net::webdav`'s PROPFIND/PUT/MKCOL/DELETE
+/// are built on; `get`/`get_https` stay as the simpler GET-only entry
+/// points the Browser app uses.
+pub fn request(
+    url: &str,
+    method: &str,
+    extra_headers: &[(&str, &str)],
+    body: &[u8],
+) -> Result<Response, FetchError> {
+    let (https, host, path) = split_url(url);
+    let ip = resolve(host)?;
+    let req = build_request(method, host, path, extra_headers, body);
+    let raw = if https {
+        let mut stream = super::tls::connect(ip, host).map_err(FetchError::TlsFailed)?;
+        stream.send(&req);
+        stream.read_to_end()
+    } else {
+        let mut stream = super::tcp::connect(ip, 80).ok_or(FetchError::ConnectFailed)?;
+        stream.send(&req);
+        stream.read_to_end()
+    };
+    parse_response(&raw).ok_or(FetchError::BadResponse)
 }
 
 /// `host` may itself already be a dotted IPv4 address (typed directly into
